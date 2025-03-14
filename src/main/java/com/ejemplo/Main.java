@@ -32,7 +32,7 @@ public class Main {
 
 		Path directorioReal = Paths.get("C:\\Users\\lStel\\OneDrive\\Documentos\\PruebaCifrado"); // Modifica esta ruta
 																									// a tu carpeta real
-		Path puntoMontaje = Paths.get("D:\\"); // La unidad virtual (elige una que no est� en uso)
+		Path puntoMontaje = Paths.get("F:\\"); // La unidad virtual (elige una que no est� en uso)
 
 		// Asegurar que el directorio original existe
 		if (!Files.exists(directorioReal)) {
@@ -40,18 +40,25 @@ public class Main {
 			return;
 		}
 
-		// Opciones de montaje
-		MaskValueSet<MountOption> mountOptions = MaskValueSet.of(MountOption.NETWORK_DRIVE);
-
-		// Opciones del sistema de archivos
-		MaskValueSet<FileSystemFlag> fsFeatures = MaskValueSet.of(FileSystemFlag.CASE_PRESERVED_NAMES, // Mantener
-																										// nombres
-																										// originales
-				FileSystemFlag.SUPPORTS_OBJECT_IDS, // Soporta ID de archivos (necesario para MS Office)
-				FileSystemFlag.SUPPORTS_REPARSE_POINTS, // Permite referencias a archivos
-				FileSystemFlag.CASE_SENSITIVE_SEARCH // Soporta nombres sensibles a may�sculas/min�sculas
+		MaskValueSet<MountOption> mountOptions = MaskValueSet.of(
+			//MountOption.REMOVABLE,           // Permitir eliminar/desmontar
+			MountOption.ALT_STREAM,         // Soportar flujos alternativos
+			MountOption.NETWORK_DRIVE       // Comportarse como unidad de red
+			//MountOption.FILELOCK_USER_MODE   
 		);
-
+		
+		// Características del sistema de archivos más completas
+		MaskValueSet<FileSystemFlag> fsFeatures = MaskValueSet.of(
+			FileSystemFlag.CASE_PRESERVED_NAMES,      // Preserve case in filenames
+			FileSystemFlag.CASE_SENSITIVE_SEARCH,     // Allow case-sensitive operations
+			FileSystemFlag.SUPPORTS_OBJECT_IDS,       // Required for some applications
+			FileSystemFlag.SUPPORTS_OPEN_BY_FILE_ID,  // Better file handling
+			FileSystemFlag.UNICODE_ON_DISK,          // Full Unicode support
+			FileSystemFlag.PERSISTENT_ACLS,          // Support for permissions
+			FileSystemFlag.NAMED_STREAMS,            // Support alternate data streams
+			FileSystemFlag.SUPPORTS_EXTENDED_ATTRIBUTES  // Support extended attributes
+		);
+		
 		// Configuraci�n del sistema de archivos
 		FileSystemInformation fsInfo = new FileSystemInformation(fsFeatures);
 

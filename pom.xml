@@ -74,21 +74,24 @@
 		<artifactId>cryptovault-api</artifactId>
 		<version>05.01.02</version>
 	</dependency>
-
-       <!-- Log4j Core -->
-       <dependency>
-           <groupId>org.apache.logging.log4j</groupId>
-           <artifactId>log4j-core</artifactId>
-           <version>2.24.1</version>
-       </dependency>
-       <!-- Log4j API -->
-       <dependency>
-           <groupId>org.apache.logging.log4j</groupId>
-           <artifactId>log4j-api</artifactId>
-           <version>2.24.1</version>
-       </dependency>
-       
-       <dependency>
+	<!-- Log4j Core -->
+	<dependency>
+	    <groupId>org.apache.logging.log4j</groupId>
+	    <artifactId>log4j-core</artifactId>
+	    <version>2.24.1</version>
+	</dependency>
+	<!-- Log4j API -->
+	<dependency>
+	    <groupId>org.apache.logging.log4j</groupId>
+	    <artifactId>log4j-api</artifactId>
+	    <version>2.24.1</version>
+	</dependency>
+	<dependency>
+		 <groupId>net.java.dev.jna</groupId>
+		 <artifactId>jna</artifactId>
+		 <version>5.9.0</version>
+	 </dependency>       
+	 <dependency>
 		<groupId>org.bouncycastle</groupId>
 		<artifactId>bcmail-jdk18on</artifactId>
 		<version>1.78.1</version>
