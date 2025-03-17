@@ -56,8 +56,9 @@ public class DirListingFileSystem extends DokanFileSystemStub {
 	private FileStore fileStore;
 	private Path root;
 	private Map<String, ByteArrayOutputStream> decryptedFiles;
+	private final String mountDrive; // Ejemplo: "D:\\" o "D:"
 
-	public DirListingFileSystem(Path root, FileSystemInformation fileSystemInformation) {
+	public DirListingFileSystem(Path root, FileSystemInformation fileSystemInformation, String mountDrive) {
 		super(fileSystemInformation);
 		this.root = root;
 		this.handleHandler = new AtomicLong(0);
@@ -68,14 +69,16 @@ public class DirListingFileSystem extends DokanFileSystemStub {
 			e.printStackTrace();
 		}
 		this.fileStore = tmp;
+		this.mountDrive = mountDrive;
 	}
 
 	public DirListingFileSystem(Path root, FileSystemInformation fileSystemInformation,
-			Map<String, ByteArrayOutputStream> decryptedFiles) {
+			Map<String, ByteArrayOutputStream> decryptedFiles, String mountDrive) {
 		super(fileSystemInformation);
 		this.root = root;
 		this.decryptedFiles = decryptedFiles;
 		this.handleHandler = new AtomicLong(0);
+		this.mountDrive = mountDrive;
 	}
 
 	@Override
@@ -87,12 +90,13 @@ public class DirListingFileSystem extends DokanFileSystemStub {
 			System.err.println("[ERROR] dokanFileInfo es nulo en zwCreateFile.");
 			return NtStatuses.STATUS_INVALID_PARAMETER;
 		}
-		
+
 		// Obtener el nombre del proceso
 		long processId = dokanFileInfo.ProcessId;
 		boolean isCopyOp = isCopyOperation(processId);
 		if (isCopyOp) {
-			System.out.println("Operación de copia detectada en zwCreateFile - Acceso denegado");
+			// System.out.println("Operación de copia detectada en zwCreateFile - Acceso
+			// denegado");
 			return NtStatuses.STATUS_ACCESS_DENIED;
 		}
 
@@ -113,75 +117,78 @@ public class DirListingFileSystem extends DokanFileSystemStub {
 				return NtStatuses.STATUS_SUCCESS;
 			}
 		} catch (InvalidPathException e) {
-			System.out.println("InvalidPathException: " + rawStr);
+			// System.out.println("InvalidPathException: " + rawStr);
 		}
-		
-		/*
-		System.out.println("(zwCreateFile) Filename: " + fileName);
-		System.out.println("(zwCreateFile) Acceso solicitado: " + rawDesiredAccess);
-		System.out.println("(zwCreateFile) Flags de compartición: " + rawShareAccess);
-		System.out.println("(zwCreateFile) Disposición de creación: " + rawCreateDisposition);
 
-		//synchronized (decryptedFiles) {
+		//// System.out.println("(zwCreateFile) Filename: " + fileName);
+		// System.out.println("(zwCreateFile) Acceso solicitado: " + rawDesiredAccess);
+		// System.out.println("(zwCreateFile) Flags de compartición: " +
+		//// rawShareAccess);
+		// System.out.println("(zwCreateFile) Disposición de creación: " +
+		//// rawCreateDisposition);
 		
+		synchronized (decryptedFiles) {
 
-		// Modificar la verificación de permisos para ser más permisiva
-		
-        boolean canRead = (rawDesiredAccess & (WinNT.GENERIC_READ | WinNT.FILE_READ_DATA | WinNT.FILE_READ_EA
-                | WinNT.FILE_READ_ATTRIBUTES | WinNT.READ_CONTROL | WinNT.SYNCHRONIZE)) != 0;
-        boolean canWrite = (rawDesiredAccess & (WinNT.GENERIC_WRITE | WinNT.FILE_WRITE_DATA | 
-                WinNT.FILE_APPEND_DATA | WinNT.GENERIC_ALL | WinNT.FILE_WRITE_ATTRIBUTES | WinNT.FILE_WRITE_EA)) != 0;
-		// Logging para debug
-		System.out.println("Permisos efectivos - Lectura: " + canRead + ", Escritura: " + canWrite);
-		*/
-		
-		boolean fileExists = decryptedFiles.containsKey(fileName);
-		CreateDisposition createDisposition = EnumInteger.enumFromInt(rawCreateDisposition,
-				CreateDisposition.values());
+			// Modificar la verificación de permisos para ser más permisiva
 
-		switch (createDisposition) {
-		case FILE_SUPERSEDE:
-		case FILE_OVERWRITE:
-		case FILE_OVERWRITE_IF:
-            // Si el archivo existe, limpiar su contenido sin borrar el objeto en memoria
-            if (fileExists) {
-                System.out.println("(zwCreateFile) Sobrescribiendo archivo (sin eliminar): " + fileName);
-                decryptedFiles.get(fileName).reset(); // Limpiar sin borrar
-            } else {
-                System.out.println("(zwCreateFile) Creando nuevo archivo en sobreescritura: " + fileName);
-                decryptedFiles.put(fileName, new ByteArrayOutputStream());
-            }
-            dokanFileInfo.Context = this.handleHandler.incrementAndGet();
-            return NtStatuses.STATUS_SUCCESS;
-            
-		case FILE_CREATE:
-			if (fileExists) {
-				return NtStatuses.STATUS_OBJECT_NAME_COLLISION;
+			boolean canRead = (rawDesiredAccess & (WinNT.GENERIC_READ | WinNT.FILE_READ_DATA | WinNT.FILE_READ_EA
+					| WinNT.FILE_READ_ATTRIBUTES | WinNT.READ_CONTROL | WinNT.SYNCHRONIZE)) != 0;
+			boolean canWrite = (rawDesiredAccess & (WinNT.GENERIC_WRITE | WinNT.FILE_WRITE_DATA | WinNT.FILE_APPEND_DATA
+					| WinNT.GENERIC_ALL | WinNT.FILE_WRITE_ATTRIBUTES | WinNT.FILE_WRITE_EA)) != 0;
+			// Logging para debug
+			// System.out.println("Permisos efectivos - Lectura: " + canRead + ", Escritura:
+			// " + canWrite);
+
+			boolean fileExists = decryptedFiles.containsKey(fileName);
+			CreateDisposition createDisposition = EnumInteger.enumFromInt(rawCreateDisposition,
+					CreateDisposition.values());
+
+			switch (createDisposition) {
+			case FILE_SUPERSEDE:
+			case FILE_OVERWRITE:
+			case FILE_OVERWRITE_IF:
+				// Si el archivo existe, limpiar su contenido sin borrar el objeto en memoria
+				if (fileExists) {
+					// System.out.println("(zwCreateFile) Sobrescribiendo archivo (sin eliminar): "
+					// + fileName);
+					decryptedFiles.get(fileName).reset(); // Limpiar sin borrar
+				} else {
+					// System.out.println("(zwCreateFile) Creando nuevo archivo en sobreescritura: "
+					// + fileName);
+					decryptedFiles.put(fileName, new ByteArrayOutputStream());
+				}
+				dokanFileInfo.Context = this.handleHandler.incrementAndGet();
+				return NtStatuses.STATUS_SUCCESS;
+
+			case FILE_CREATE:
+				if (fileExists) {
+					return NtStatuses.STATUS_OBJECT_NAME_COLLISION;
+				}
+				// System.out.println("(zwCreateFile) Creando nuevo archivo: " + fileName);
+				decryptedFiles.put(fileName, new ByteArrayOutputStream());
+				dokanFileInfo.Context = this.handleHandler.incrementAndGet();
+				return NtStatuses.STATUS_SUCCESS;
+
+			case FILE_OPEN:
+			case FILE_OPEN_IF:
+				if (!fileExists) {
+					if (createDisposition == CreateDisposition.FILE_OPEN_IF) {
+						// System.out.println("(zwCreateFile) Archivo no encontrado, creando nuevo
+						// (OPEN_IF): " + fileName);
+						decryptedFiles.put(fileName, new ByteArrayOutputStream());
+					} else {
+						// System.out.println("(zwCreateFile) Archivo no encontrado: " + fileName);
+						return NtStatuses.STATUS_OBJECT_NAME_NOT_FOUND;
+					}
+				}
+				// System.out.println("(zwCreateFile) Abriendo archivo existente: " + fileName);
+				dokanFileInfo.Context = this.handleHandler.incrementAndGet();
+				return NtStatuses.STATUS_SUCCESS;
+
+			default:
+				return NtStatuses.STATUS_INVALID_PARAMETER;
 			}
-			System.out.println("(zwCreateFile) Creando nuevo archivo: " + fileName);
-			decryptedFiles.put(fileName, new ByteArrayOutputStream());
-			dokanFileInfo.Context = this.handleHandler.incrementAndGet();
-			return NtStatuses.STATUS_SUCCESS;
-
-		case FILE_OPEN:
-		case FILE_OPEN_IF:
-            if (!fileExists) {
-                if (createDisposition == CreateDisposition.FILE_OPEN_IF) {
-                    System.out.println("(zwCreateFile) Archivo no encontrado, creando nuevo (OPEN_IF): " + fileName);
-                    decryptedFiles.put(fileName, new ByteArrayOutputStream());
-                } else {
-                    System.out.println("(zwCreateFile) Archivo no encontrado: " + fileName);
-                    return NtStatuses.STATUS_OBJECT_NAME_NOT_FOUND;
-                }
-            }
-            System.out.println("(zwCreateFile) Abriendo archivo existente: " + fileName);
-            dokanFileInfo.Context = this.handleHandler.incrementAndGet();
-            return NtStatuses.STATUS_SUCCESS;
-
-		default:
-			return NtStatuses.STATUS_INVALID_PARAMETER;
 		}
-		//}
 	}
 
 	@Override
@@ -192,7 +199,8 @@ public class DirListingFileSystem extends DokanFileSystemStub {
 		long processId = dokanFileInfo.ProcessId;
 		boolean isCopyOp = isCopyOperation(processId);
 		if (isCopyOp) {
-			System.out.println("Operación de copia detectada en zwCreateFile - Acceso denegado");
+			// System.out.println("Operación de copia detectada en zwCreateFile - Acceso
+			// denegado");
 			return NtStatuses.STATUS_ACCESS_DENIED;
 		}
 
@@ -205,9 +213,10 @@ public class DirListingFileSystem extends DokanFileSystemStub {
 			fileName = (p.getFileName() != null ? p.getFileName().toString() : "");
 		}
 
-		System.out.println("(writeFile) Escribiendo en: " + fileName + " Offset: " + rawOffset);
+		// System.out.println("(writeFile) Escribiendo en: " + fileName + " Offset: " +
+		// rawOffset);
 
-		//synchronized (decryptedFiles) {
+		synchronized (decryptedFiles) {
 			ByteArrayOutputStream memoryStream = decryptedFiles.get(fileName);
 
 			// Si no existe, se crea nuevo stream automáticamente (para casos de creación)
@@ -215,9 +224,6 @@ public class DirListingFileSystem extends DokanFileSystemStub {
 				memoryStream = new ByteArrayOutputStream();
 				decryptedFiles.put(fileName, memoryStream);
 			}
-			
-			/*
-
 			// Obtener contenido actual del archivo
 			byte[] data = memoryStream.toByteArray();
 
@@ -240,17 +246,8 @@ public class DirListingFileSystem extends DokanFileSystemStub {
 
 			rawWrittenLength.setValue(rawBufferLength);
 			return NtStatuses.STATUS_SUCCESS;
-			*/
-	            byte[] buffer = new byte[rawBufferLength];
-	            rawBuffer.read(0, buffer, 0, rawBufferLength);
 
-	            // **Solución: Escribir datos en la posición correcta en el buffer**
-	            memoryStream.write(buffer, (int) rawOffset, rawBufferLength);
-
-	            rawWrittenLength.setValue(rawBufferLength);
-	            System.out.println("(writeFile) Datos escritos correctamente.");
-	            return NtStatuses.STATUS_SUCCESS;
-		//}
+		}
 	}
 
 	@Override
@@ -261,7 +258,8 @@ public class DirListingFileSystem extends DokanFileSystemStub {
 		long processId = dokanFileInfo.ProcessId;
 		boolean isCopyOp = isCopyOperation(processId);
 		if (isCopyOp) {
-			System.out.println("Operación de copia detectada en zwCreateFile - Acceso denegado");
+			// System.out.println("Operación de copia detectada en zwCreateFile - Acceso
+			// denegado");
 			return NtStatuses.STATUS_ACCESS_DENIED;
 		}
 
@@ -273,8 +271,6 @@ public class DirListingFileSystem extends DokanFileSystemStub {
 			Path p = Paths.get(rawStr);
 			fileName = (p.getFileName() != null ? p.getFileName().toString() : "");
 		}
-
-		// System.out.println("(readfile) Filename: " + fileName);
 
 		byte[] data = decryptedFiles.get(fileName).toByteArray();
 
@@ -575,63 +571,66 @@ public class DirListingFileSystem extends DokanFileSystemStub {
 
 	@Override
 	public int flushFileBuffers(WString rawPath, DokanFileInfo dokanFileInfo) {
-	    //synchronized (decryptedFiles) {
-	        String fileName = Paths.get(rawPath.toString()).getFileName().toString();
+		synchronized (decryptedFiles) {
+			String fileName = Paths.get(rawPath.toString()).getFileName().toString();
 
-	        // Si el archivo es temporal, no hacer flush, solo permitir escritura
-	        if (fileName.endsWith(".tmp") || fileName.startsWith("~$")) {
-	            System.out.println("(flushFileBuffers) Ignorando archivo temporal: " + fileName);
-	            return NtStatuses.STATUS_SUCCESS;
-	        }
+			// Si el archivo es temporal, no hacer flush, solo permitir escritura
+			if (fileName.endsWith(".tmp") || fileName.startsWith("~$")) {
+				// System.out.println("(flushFileBuffers) Ignorando archivo temporal: " +
+				// fileName);
+				return NtStatuses.STATUS_SUCCESS;
+			}
 
-	        if (!decryptedFiles.containsKey(fileName)) {
-	            System.err.println("(flushFileBuffers) Archivo no encontrado en memoria: " + fileName);
-	            return NtStatuses.STATUS_OBJECT_NAME_NOT_FOUND;
-	        }
+			if (!decryptedFiles.containsKey(fileName)) {
+				System.err.println("(flushFileBuffers) Archivo no encontrado en memoria: " + fileName);
+				return NtStatuses.STATUS_OBJECT_NAME_NOT_FOUND;
+			}
 
-	        // Si el archivo está en uso, retornar error de acceso
-	        if (isFileInUse(fileName)) {
-	            System.err.println("(flushFileBuffers) Archivo en uso, no se puede vaciar: " + fileName);
-	            return NtStatuses.STATUS_SHARING_VIOLATION;
-	        }
+			// Si el archivo está en uso, retornar error de acceso
+			if (isFileInUse(fileName)) {
+				System.err.println("(flushFileBuffers) Archivo en uso, no se puede vaciar: " + fileName);
+				return NtStatuses.STATUS_SHARING_VIOLATION;
+			}
 
-	        try {
-	            ByteArrayOutputStream memoryStream = decryptedFiles.get(fileName);
-	            
-	            // Guardar los cambios en memoria
-	            byte[] currentData = memoryStream.toByteArray();
-	            //decryptedFiles.put(fileName, new ByteArrayOutputStream());
-	            //decryptedFiles.get(fileName).write(currentData);
-	            memoryStream.flush();
-	            System.out.println("(flushFileBuffers) Archivo confirmado en memoria: " + fileName);
-	            return NtStatuses.STATUS_SUCCESS;
+			try {
+				ByteArrayOutputStream memoryStream = decryptedFiles.get(fileName);
 
-	        } catch (IOException e) {
-	            System.err.println("Error al vaciar buffers en memoria para: " + fileName);
-	            return NtStatuses.STATUS_IO_DEVICE_ERROR;
-	        }
-	    //}
+				// Guardar los cambios en memoria
+				byte[] currentData = memoryStream.toByteArray();
+				// decryptedFiles.put(fileName, new ByteArrayOutputStream());
+				// decryptedFiles.get(fileName).write(currentData);
+				memoryStream.flush();
+				// System.out.println("(flushFileBuffers) Archivo confirmado en memoria: " +
+				// fileName);
+				return NtStatuses.STATUS_SUCCESS;
+
+			} catch (IOException e) {
+				System.err.println("Error al vaciar buffers en memoria para: " + fileName);
+				return NtStatuses.STATUS_IO_DEVICE_ERROR;
+			}
+		}
 	}
-	
+
 	public boolean isFileInUse(String fileName) {
-	    try {
-	        Path filePath = Paths.get("D:\\", fileName); // Ajusta según la ruta de tu unidad virtual
-	        File file = filePath.toFile();
+		try {
+			Path filePath = Paths.get("D:\\", fileName); // Ajusta según la ruta de tu unidad virtual
+			File file = filePath.toFile();
 
-	        // Intentar abrir el archivo con acceso exclusivo
-	        try (RandomAccessFile raf = new RandomAccessFile(file, "rw")) {
-	            // Si el archivo se abre sin errores, significa que NO está en uso
-	            return false;
-	        }
-	    } catch (Exception e) {
-	        // Si hay un error de acceso, el archivo está en uso
-	        return true;
-	    }
+			// Intentar abrir el archivo con acceso exclusivo
+			try (RandomAccessFile raf = new RandomAccessFile(file, "rw")) {
+				// Si el archivo se abre sin errores, significa que NO está en uso
+				return false;
+			}
+		} catch (Exception e) {
+			// Si hay un error de acceso, el archivo está en uso
+			return true;
+		}
 	}
-	
+
 	@Override
 	public void close() {
-		System.out.println("Persistiendo cambios antes de cerrar el sistema de archivos...");
+		// System.out.println("Persistiendo cambios antes de cerrar el sistema de
+		// archivos...");
 
 		CryptoVault cryptoVault = new CryptoVault();
 		String alias = "AES"; // Ajusta el alias según corresponda
@@ -648,7 +647,8 @@ public class DirListingFileSystem extends DokanFileSystemStub {
 				try (OutputStream fos = new FileOutputStream(outputFile)) {
 					// Llamar al método de cifrado basado en streams
 					cryptoVault.encryptAEAD(bais, alias, fos);
-					System.out.println("Archivo cifrado guardado: " + outputFile.getAbsolutePath());
+					// System.out.println("Archivo cifrado guardado: " +
+					// outputFile.getAbsolutePath());
 				}
 
 				// Opcional: Si deseas borrar la versión en memoria después de cifrarla
@@ -669,115 +669,116 @@ public class DirListingFileSystem extends DokanFileSystemStub {
 			int rawSecurityDescriptorLength, DokanFileInfo dokanFileInfo) {
 		// Extraer el nombre del archivo
 		String fileName = rawPath.toString().replace("\\", "").replace("/", "");
-		System.out.println("(SetFileSecurity) Estableciendo permisos en: " + fileName);
+		// System.out.println("(SetFileSecurity) Estableciendo permisos en: " +
+		// fileName);
 
 		// Aceptamos todos los cambios de permisos sin aplicarlos realmente (Simulación)
 		return NtStatuses.STATUS_SUCCESS;
 	}
-	
+
 	/*
+	 * @Override public int getFileSecurity(WString rawPath, int
+	 * rawSecurityInformation, Pointer rawSecurityDescriptor, int
+	 * rawSecurityDescriptorLength, IntByReference
+	 * rawSecurityDescriptorLengthNeeded, DokanFileInfo dokanFileInfo) { // Extraer
+	 * el nombre del archivo (para logging) String fileName =
+	 * rawPath.toString().replace("\\", "").replace("/", "");
+	 * //System.out.println("(getFileSecurity) Solicitando permisos para: " +
+	 * fileName);
+	 * 
+	 * Advapi32 advapi32 = Advapi32.INSTANCE;
+	 * 
+	 * // Crear e inicializar el descriptor de seguridad WinNT.SECURITY_DESCRIPTOR
+	 * securityDescriptor = new WinNT.SECURITY_DESCRIPTOR(); boolean success =
+	 * advapi32.InitializeSecurityDescriptor(securityDescriptor,
+	 * WinNT.SECURITY_DESCRIPTOR_REVISION); if (!success) {
+	 * System.err.println("Error al inicializar el descriptor de seguridad.");
+	 * return NtStatuses.STATUS_ACCESS_DENIED; }
+	 * 
+	 * // Establecer un DACL nulo para otorgar acceso total a todos (sin
+	 * restricciones) success =
+	 * advapi32.SetSecurityDescriptorDacl(securityDescriptor, true, null, false); if
+	 * (!success) { System.err.
+	 * println("Error al asignar un DACL nulo al descriptor de seguridad."); return
+	 * NtStatuses.STATUS_ACCESS_DENIED; }
+	 * 
+	 * // Obtener el tamaño requerido para el descriptor de seguridad int sdSize =
+	 * securityDescriptor.size();
+	 * rawSecurityDescriptorLengthNeeded.setValue(sdSize);
+	 * 
+	 * // Si el buffer proporcionado es muy pequeño, se retorna
+	 * STATUS_BUFFER_TOO_SMALL if (rawSecurityDescriptorLength < sdSize) { return
+	 * NtStatuses.STATUS_BUFFER_TOO_SMALL; }
+	 * 
+	 * // Escribir el descriptor de seguridad en el buffer proporcionado
+	 * securityDescriptor.write(); // Asegura que la estructura se sincronice con la
+	 * memoria subyacente byte[] sdBytes =
+	 * securityDescriptor.getPointer().getByteArray(0, sdSize);
+	 * rawSecurityDescriptor.write(0, sdBytes, 0, sdSize);
+	 * 
+	 * return NtStatuses.STATUS_SUCCESS; }
+	 */
 	@Override
-	public int getFileSecurity(WString rawPath, int rawSecurityInformation, Pointer rawSecurityDescriptor, 
-	                           int rawSecurityDescriptorLength, IntByReference rawSecurityDescriptorLengthNeeded, 
-	                           DokanFileInfo dokanFileInfo) {
-	    // Extraer el nombre del archivo (para logging)
-	    String fileName = rawPath.toString().replace("\\", "").replace("/", "");
-	    System.out.println("(getFileSecurity) Solicitando permisos para: " + fileName);
+	public int moveFile(WString existingFileName, WString newFileName, boolean replaceIfExisting,
+			DokanFileInfo dokanFileInfo) {
+		synchronized (decryptedFiles) {
+			String oldName = Paths.get(existingFileName.toString()).getFileName().toString();
+			String newName = Paths.get(newFileName.toString()).getFileName().toString();
 
-	    Advapi32 advapi32 = Advapi32.INSTANCE;
+			if (!decryptedFiles.containsKey(oldName)) {
+				return NtStatuses.STATUS_OBJECT_NAME_NOT_FOUND;
+			}
 
-	    // Crear e inicializar el descriptor de seguridad
-	    WinNT.SECURITY_DESCRIPTOR securityDescriptor = new WinNT.SECURITY_DESCRIPTOR();
-	    boolean success = advapi32.InitializeSecurityDescriptor(securityDescriptor, WinNT.SECURITY_DESCRIPTOR_REVISION);
-	    if (!success) {
-	        System.err.println("Error al inicializar el descriptor de seguridad.");
-	        return NtStatuses.STATUS_ACCESS_DENIED;
-	    }
+			if (replaceIfExisting && decryptedFiles.containsKey(newName)) {
+				decryptedFiles.remove(newName); // Eliminar el archivo destino si ya existe
+			}
 
-	    // Establecer un DACL nulo para otorgar acceso total a todos (sin restricciones)
-	    success = advapi32.SetSecurityDescriptorDacl(securityDescriptor, true, null, false);
-	    if (!success) {
-	        System.err.println("Error al asignar un DACL nulo al descriptor de seguridad.");
-	        return NtStatuses.STATUS_ACCESS_DENIED;
-	    }
-
-	    // Obtener el tamaño requerido para el descriptor de seguridad
-	    int sdSize = securityDescriptor.size();
-	    rawSecurityDescriptorLengthNeeded.setValue(sdSize);
-
-	    // Si el buffer proporcionado es muy pequeño, se retorna STATUS_BUFFER_TOO_SMALL
-	    if (rawSecurityDescriptorLength < sdSize) {
-	        return NtStatuses.STATUS_BUFFER_TOO_SMALL;
-	    }
-
-	    // Escribir el descriptor de seguridad en el buffer proporcionado
-	    securityDescriptor.write(); // Asegura que la estructura se sincronice con la memoria subyacente
-	    byte[] sdBytes = securityDescriptor.getPointer().getByteArray(0, sdSize);
-	    rawSecurityDescriptor.write(0, sdBytes, 0, sdSize);
-
-	    return NtStatuses.STATUS_SUCCESS;
-	}
-	*/
-	@Override
-	public int moveFile(WString existingFileName, WString newFileName, boolean replaceIfExisting, DokanFileInfo dokanFileInfo) {
-	    //synchronized (decryptedFiles) {
-	        String oldName = Paths.get(existingFileName.toString()).getFileName().toString();
-	        String newName = Paths.get(newFileName.toString()).getFileName().toString();
-
-	        if (!decryptedFiles.containsKey(oldName)) {
-	            return NtStatuses.STATUS_OBJECT_NAME_NOT_FOUND;
-	        }
-	        
-	       if (replaceIfExisting && decryptedFiles.containsKey(newName)) {
-	            decryptedFiles.remove(newName); // Eliminar el archivo destino si ya existe
-	        }
-
-	        ByteArrayOutputStream fileData = decryptedFiles.remove(oldName);
-	        decryptedFiles.put(newName, fileData);
-	        System.out.println("(moveFile) Archivo renombrado: " + oldName + " → " + newName);
-	    //}
-	    return NtStatuses.STATUS_SUCCESS;
+			ByteArrayOutputStream fileData = decryptedFiles.remove(oldName);
+			decryptedFiles.put(newName, fileData);
+			// System.out.println("(moveFile) Archivo renombrado: " + oldName + " → " +
+			// newName);
+		}
+		return NtStatuses.STATUS_SUCCESS;
 	}
 
 	@Override
 	public int deleteFile(WString rawPath, DokanFileInfo dokanFileInfo) {
-	    //synchronized (decryptedFiles) {
-	        String fileName = Paths.get(rawPath.toString()).getFileName().toString();
+		synchronized (decryptedFiles) {
+			// Se asume que rawPath viene en formato "\archivo.ext"
+			String fileName = Paths.get(rawPath.toString()).getFileName().toString();
 
-	        System.out.println("(deleteFile) Intentando eliminar: " + fileName);
+			// Verificar si el archivo está en uso antes de eliminarlo
+			if (isFileInUse(fileName)) {
+				System.err.println("(deleteFile) Archivo en uso, no se puede eliminar: " + fileName);
+				return NtStatuses.STATUS_SHARING_VIOLATION;
+			}
 
-	        // **Verificar si el archivo está en uso antes de eliminarlo**
-	        if (isFileInUse(fileName)) {
-	            System.err.println("(deleteFile) Archivo en uso, no se puede eliminar: " + fileName);
-	            return NtStatuses.STATUS_SHARING_VIOLATION;
-	        }
+			// Si está en decryptedFiles, eliminarlo
+			if (decryptedFiles.containsKey(fileName)) {
+				decryptedFiles.remove(fileName);
+				return NtStatuses.STATUS_SUCCESS;
+			}
 
-	        // **Si está en decryptedFiles, eliminarlo**
-	        if (decryptedFiles.containsKey(fileName)) {
-	            decryptedFiles.remove(fileName);
-	            System.out.println("(deleteFile) Archivo eliminado de memoria: " + fileName);
-	            return NtStatuses.STATUS_SUCCESS;
-	        }
+			// Si el archivo no estaba en decryptedFiles, verificar si fue creado en la
+			// unidad virtual
+			// Se utiliza la letra de la unidad almacenada en mountDrive
+			Path filePath = Paths.get(mountDrive, fileName);
+			System.out.println("FILE PATH: " + filePath.toString());
+			File file = filePath.toFile();
 
-	        // **Si el archivo no estaba en decryptedFiles, verificar si fue creado en la unidad virtual**
-	        Path filePath = Paths.get("D:\\", fileName); // Ruta en la unidad virtual
-	        File file = filePath.toFile();
+			if (file.exists()) {
+				System.out.println("Archivo creado en la unidad virtual");
+				if (file.delete()) {
+					return NtStatuses.STATUS_SUCCESS;
+				} else {
+					System.err.println("(deleteFile) No se pudo eliminar el archivo: " + fileName);
+					return NtStatuses.STATUS_ACCESS_DENIED;
+				}
+			}
 
-	        if (file.exists()) {
-	            if (file.delete()) {
-	                System.out.println("(deleteFile) Archivo eliminado de la unidad virtual: " + fileName);
-	                return NtStatuses.STATUS_SUCCESS;
-	            } else {
-	                System.err.println("(deleteFile) No se pudo eliminar el archivo: " + fileName);
-	                return NtStatuses.STATUS_ACCESS_DENIED;
-	            }
-	        }
-
-	        // **Si el archivo no existe ni en memoria ni en la unidad virtual, devolver error**
-	        System.err.println("(deleteFile) Archivo no encontrado: " + fileName);
-	        return NtStatuses.STATUS_OBJECT_NAME_NOT_FOUND;
-	    //}
+			System.err.println("(deleteFile) Archivo no encontrado: " + fileName);
+			return NtStatuses.STATUS_OBJECT_NAME_NOT_FOUND;
+		}
 	}
-
 
 }

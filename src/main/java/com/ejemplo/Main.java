@@ -30,12 +30,12 @@ public class Main {
 	public static void main(String[] args) {
 		System.out.println("Iniciando el sistema de archivos con Dokan.");
 
-		Path directorioReal = Paths.get("C:\\Users\\lStel\\OneDrive\\Documentos\\PruebaCifrado"); // Modifica esta ruta
-																									// a tu carpeta real
-		Path puntoMontaje = Paths.get("F:\\"); // La unidad virtual (elige una que no est� en uso)
+		// Modificar
+		Path localPath = Paths.get("C:\\Users\\lStel\\OneDrive\\Documentos\\PruebaCifrado"); 
+		Path mountPoint  = Paths.get("F:\\"); // La unidad virtual
 
 		// Asegurar que el directorio original existe
-		if (!Files.exists(directorioReal)) {
+		if (!Files.exists(localPath)) {
 			System.out.println("Error: El directorio original no existe.");
 			return;
 		}
@@ -49,14 +49,14 @@ public class Main {
 		
 		// Características del sistema de archivos más completas
 		MaskValueSet<FileSystemFlag> fsFeatures = MaskValueSet.of(
-			FileSystemFlag.CASE_PRESERVED_NAMES,      // Preserve case in filenames
-			FileSystemFlag.CASE_SENSITIVE_SEARCH,     // Allow case-sensitive operations
-			FileSystemFlag.SUPPORTS_OBJECT_IDS,       // Required for some applications
-			FileSystemFlag.SUPPORTS_OPEN_BY_FILE_ID,  // Better file handling
-			FileSystemFlag.UNICODE_ON_DISK,          // Full Unicode support
-			FileSystemFlag.PERSISTENT_ACLS,          // Support for permissions
-			FileSystemFlag.NAMED_STREAMS,            // Support alternate data streams
-			FileSystemFlag.SUPPORTS_EXTENDED_ATTRIBUTES  // Support extended attributes
+			FileSystemFlag.CASE_PRESERVED_NAMES         // Preserve case in filenames
+			//FileSystemFlag.CASE_SENSITIVE_SEARCH,     // Allow case-sensitive operations
+			//FileSystemFlag.SUPPORTS_OBJECT_IDS,       // Required for some applications
+			//FileSystemFlag.SUPPORTS_OPEN_BY_FILE_ID,  // Better file handling
+			//FileSystemFlag.UNICODE_ON_DISK,          // Full Unicode support
+			//FileSystemFlag.PERSISTENT_ACLS             // Support for permissions
+			//FileSystemFlag.NAMED_STREAMS,            // Support alternate data streams
+			//FileSystemFlag.SUPPORTS_EXTENDED_ATTRIBUTES  // Support extended attributes
 		);
 		
 		// Configuraci�n del sistema de archivos
@@ -70,7 +70,7 @@ public class Main {
 			Map<String, ByteArrayOutputStream> decryptedContent = new HashMap<>();
 
 			// Cifrar y descifrar cada archivo en el directorio
-			Files.walk(directorioReal).filter(Files::isRegularFile).forEach(file -> {
+			Files.walk(localPath).filter(Files::isRegularFile).forEach(file -> {
 				try {
 					String alias = "AES";
 					String fileName = file.getFileName().toString();
@@ -109,10 +109,10 @@ public class Main {
 			}
 
 			// Crear el sistema de archivos virtual basado en el contenido descifrado
-			try (DirListingFileSystem fs = new DirListingFileSystem(directorioReal, fsInfo, updatedMap)) {
+			try (DirListingFileSystem fs = new DirListingFileSystem(localPath, fsInfo, updatedMap, mountPoint.toString())) {
 				// Montar el sistema de archivos
-				System.out.println("Montando el sistema de archivos en " + puntoMontaje);
-				fs.mount(puntoMontaje, mountOptions);
+				System.out.println("Montando el sistema de archivos en " + mountPoint );
+				fs.mount(mountPoint , mountOptions);
 				System.out.println("Sistema de archivos montado. Escribe 'exit' para desmontar y salir.");
 
 				// Esperar entrada del usuario para desmontar
