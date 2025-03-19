@@ -41,10 +41,15 @@ public class Main {
 		}
 
 		MaskValueSet<MountOption> mountOptions = MaskValueSet.of(
-			//MountOption.REMOVABLE,           // Permitir eliminar/desmontar
-			MountOption.ALT_STREAM,         // Soportar flujos alternativos
-			MountOption.NETWORK_DRIVE       // Comportarse como unidad de red
-			//MountOption.FILELOCK_USER_MODE   
+				//MountOption.DEBUG_MODE //Enable output debug message
+				//MountOption.STD_ERR_OUTPUT //Enable output debug message to stderr
+				MountOption.ALT_STREAM, //Use alternate stream
+				//MountOption.WRITE_PROTECTION //Enable mount drive as write-protected
+				MountOption.NETWORK_DRIVE //Use network drive - Dokan network provider need to be installed
+				//MountOption.REMOVABLE //Use removable drive
+				//MountOption.MOUNT_MANAGER //Use mount manager
+				//MountOption.CURRENT_SESSION  //Mount the drive on current session only
+				//MountOption.FILELOCK_USER_MODE //Enable Lockfile/Unlockfile operations. Otherwise Dokan will take care of it
 		);
 		
 		// Características del sistema de archivos más completas

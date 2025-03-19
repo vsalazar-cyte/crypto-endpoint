@@ -24,11 +24,13 @@ import dev.dokan.dokan_java.structure.DokanFileInfo;
 import dev.dokan.dokan_java.structure.DokanIOSecurityContext;
 import jnr.ffi.Memory;
 
+import java.io.BufferedReader;
 import java.io.ByteArrayInputStream;
 import java.io.ByteArrayOutputStream;
 import java.io.File;
 import java.io.FileOutputStream;
 import java.io.IOException;
+import java.io.InputStreamReader;
 import java.io.OutputStream;
 import java.io.RandomAccessFile;
 import java.nio.file.FileStore;
@@ -47,6 +49,7 @@ import java.util.Set;
 import java.util.concurrent.atomic.AtomicLong;
 import java.util.stream.Stream;
 
+
 /**
  * This filesystem shows the content of a given directory and it sub directories
  */
@@ -57,6 +60,7 @@ public class DirListingFileSystem extends DokanFileSystemStub {
 	private Path root;
 	private Map<String, ByteArrayOutputStream> decryptedFiles;
 	private final String mountDrive; // Ejemplo: "D:\\" o "D:"
+	private static final ThreadLocal<DokanContext> contextHolder = ThreadLocal.withInitial(DokanContext::new);
 
 	public DirListingFileSystem(Path root, FileSystemInformation fileSystemInformation, String mountDrive) {
 		super(fileSystemInformation);
@@ -79,6 +83,7 @@ public class DirListingFileSystem extends DokanFileSystemStub {
 		this.decryptedFiles = decryptedFiles;
 		this.handleHandler = new AtomicLong(0);
 		this.mountDrive = mountDrive;
+		System.out.println("DirListingFileSystem: " + mountDrive);
 	}
 
 	@Override
@@ -90,15 +95,25 @@ public class DirListingFileSystem extends DokanFileSystemStub {
 			System.err.println("[ERROR] dokanFileInfo es nulo en zwCreateFile.");
 			return NtStatuses.STATUS_INVALID_PARAMETER;
 		}
-
-		// Obtener el nombre del proceso
-		long processId = dokanFileInfo.ProcessId;
-		boolean isCopyOp = isCopyOperation(processId);
-		if (isCopyOp) {
-			// System.out.println("Operación de copia detectada en zwCreateFile - Acceso
-			// denegado");
-			return NtStatuses.STATUS_ACCESS_DENIED;
-		}
+		
+	    // Verificar que la ruta solicitada pertenezca a la unidad virtual
+	    String requestedPath = rawPath.toString();
+	    try {
+	        Path p = Paths.get(requestedPath);
+	        // Si la ruta es absoluta, debe tener la raíz (drive) igual a la unidad virtual
+	        if (p.isAbsolute()) {
+	            // Por ejemplo, mountDrive podría ser "D:\\" o "D:" (asegúrate de tener el formato consistente)
+	            String drive = (p.getRoot() != null ? p.getRoot().toString() : "");
+	            if (!drive.equalsIgnoreCase(mountDrive)) {
+	                System.err.println("Intento de abrir o crear archivo fuera de la unidad virtual: " + requestedPath);
+	                return NtStatuses.STATUS_ACCESS_DENIED;
+	            }
+	        }
+	        // Si la ruta es relativa, se asume que está dentro de la unidad virtual (ya que Dokan la interpreta relativa al mount point)
+	    } catch (InvalidPathException e) {
+	        System.err.println("Ruta inválida: " + requestedPath);
+	        return NtStatuses.STATUS_INVALID_PARAMETER;
+	    }
 
 		String rawStr = rawPath.toString();
 		String fileName = "";
@@ -195,15 +210,6 @@ public class DirListingFileSystem extends DokanFileSystemStub {
 	public int writeFile(WString rawPath, Pointer rawBuffer, int rawBufferLength, IntByReference rawWrittenLength,
 			long rawOffset, DokanFileInfo dokanFileInfo) {
 
-		// Obtener el nombre del proceso
-		long processId = dokanFileInfo.ProcessId;
-		boolean isCopyOp = isCopyOperation(processId);
-		if (isCopyOp) {
-			// System.out.println("Operación de copia detectada en zwCreateFile - Acceso
-			// denegado");
-			return NtStatuses.STATUS_ACCESS_DENIED;
-		}
-
 		String rawStr = rawPath.toString();
 		String fileName;
 		if (rawStr.equals("\\") || rawStr.isEmpty()) {
@@ -252,146 +258,86 @@ public class DirListingFileSystem extends DokanFileSystemStub {
 
 	@Override
 	public int readFile(WString rawPath, Pointer rawBuffer, int rawBufferLength, IntByReference rawReadLength,
-			long rawOffset, DokanFileInfo dokanFileInfo) {
+	                    long rawOffset, DokanFileInfo dokanFileInfo) {
 
-		// Obtener el nombre del proceso
-		long processId = dokanFileInfo.ProcessId;
-		boolean isCopyOp = isCopyOperation(processId);
-		if (isCopyOp) {
-			// System.out.println("Operación de copia detectada en zwCreateFile - Acceso
-			// denegado");
-			return NtStatuses.STATUS_ACCESS_DENIED;
-		}
+	    // Actualizar el contexto con el PID del proceso que invoca la operación
+	    getContext().pid.set(dokanFileInfo.ProcessId);
 
-		String rawStr = rawPath.toString();
-		String fileName;
-		if (rawStr.equals("\\") || rawStr.isEmpty()) {
-			fileName = "";
-		} else {
-			Path p = Paths.get(rawStr);
-			fileName = (p.getFileName() != null ? p.getFileName().toString() : "");
-		}
+	    // Detectar si se trata de un intento de copia (por ejemplo, extrayendo el archivo fuera de la unidad virtual)
+	    if (isCopyAttempt(rawPath.toString())) {
+	        System.err.println("Intento de copia detectado para " + rawPath + " - Acceso denegado.");
+	        return NtStatuses.STATUS_ACCESS_DENIED;
+	    }
 
-		byte[] data = decryptedFiles.get(fileName).toByteArray();
+	    // Obtener el nombre del archivo a partir de rawPath
+	    String rawStr = rawPath.toString();
+	    String fileName;
+	    if (rawStr.equals("\\") || rawStr.isEmpty()) {
+	        fileName = "";
+	    } else {
+	        Path p = Paths.get(rawStr);
+	        fileName = (p.getFileName() != null ? p.getFileName().toString() : "");
+	    }
 
-		// Validar límites de lectura
-		int offset = (int) rawOffset;
-		if (offset >= data.length) {
-			rawReadLength.setValue(0);
-			return NtStatuses.STATUS_END_OF_FILE;
-		}
+	    // Obtener los datos en memoria para el archivo solicitado
+	    ByteArrayOutputStream baos = decryptedFiles.get(fileName);
+	    if (baos == null) {
+	        return NtStatuses.STATUS_OBJECT_NAME_NOT_FOUND;
+	    }
+	    byte[] data = baos.toByteArray();
 
-		// Cantidad de datos a leer
-		int bytesToRead = Math.min(rawBufferLength, data.length - offset);
+	    // Validar límites de lectura
+	    int offset = (int) rawOffset;
+	    if (offset >= data.length) {
+	        rawReadLength.setValue(0);
+	        return NtStatuses.STATUS_END_OF_FILE;
+	    }
 
-		// Copiar datos al buffer de Dokan
-		rawBuffer.write(0, data, offset, bytesToRead);
-		rawReadLength.setValue(bytesToRead);
+	    // Calcular la cantidad de bytes a leer y copiarlos al buffer de Dokan
+	    int bytesToRead = Math.min(rawBufferLength, data.length - offset);
+	    rawBuffer.write(0, data, offset, bytesToRead);
+	    rawReadLength.setValue(bytesToRead);
 
-		return NtStatuses.STATUS_SUCCESS;
+	    return NtStatuses.STATUS_SUCCESS;
 	}
 
-	private boolean isCopyOperation(long processId) {
-		try {
-			String processName = getProcessName(processId);
+	public DokanContext getContext() {
+	    return contextHolder.get();
+	}
+	
+	private boolean isCopyAttempt(String path) {
+	    try {
+	        int pid = (int) getContext().pid.get();
+	        String processCmd = getProcessCommandLine(pid).toLowerCase();
 
-			// Verificar procesos conocidos de copia
-			Set<String> copyProcesses = new HashSet<>(
-					Arrays.asList("cmd.exe", "powershell.exe", "totalcmd.exe", "fastcopy.exe", "teracopy.exe"));
-
-			if (copyProcesses.contains(processName.toLowerCase())) {
-
-				// Para Explorer, verificar operaciones específicas
-				if (processName.equalsIgnoreCase("explorer.exe")) {
-					return isExplorerCopyOperation(processId);
-				}
-
-				// Verificar la línea de comandos del proceso
-				String cmdLineQuery = "powershell -Command \"Get-WmiObject Win32_Process -Filter 'ProcessId="
-						+ processId + "' | Select-Object -ExpandProperty CommandLine\"";
-				Process process = Runtime.getRuntime().exec(cmdLineQuery);
-				Scanner s = new Scanner(process.getInputStream()).useDelimiter("\\A");
-				String cmdLine = s.hasNext() ? s.next().toLowerCase() : "";
-
-				// Detectar comandos de copia
-				if (cmdLine.contains("xcopy") || cmdLine.contains("robocopy") || cmdLine.contains("copy")
-						|| cmdLine.contains("move") || cmdLine.contains("cut")) {
-					return true;
-				}
-			}
-
-			// Verificar si el proceso padre es una operación de copia
-			String parentPidQuery = "powershell -Command \"Get-WmiObject Win32_Process -Filter 'ProcessId=" + processId
-					+ "' | Select-Object -ExpandProperty ParentProcessId\"";
-			Process parentProcess = Runtime.getRuntime().exec(parentPidQuery);
-			Scanner ps = new Scanner(parentProcess.getInputStream()).useDelimiter("\\A");
-			if (ps.hasNext()) {
-				long parentPid = Long.parseLong(ps.next().trim());
-				return isCopyOperation(parentPid);
-			}
-
-			return false;
-
-		} catch (Exception e) {
-			System.err.println("Error verificando operación de copia: " + e.getMessage());
-			return false;
-		}
+	        // Detectar comandos comunes de copia en Windows
+	        return processCmd.contains("copy") ||
+	               processCmd.contains("xcopy") ||
+	               processCmd.contains("robocopy") ||
+	               processCmd.contains("explorer");
+	    } catch (Exception e) {
+	        return false;
+	    }
 	}
 
-	private boolean isExplorerCopyOperation(long processId) {
-		try {
-			// Verificar ventanas y diálogos de Explorer
-			String windowQuery = "powershell -Command \"" + "Add-Type -AssemblyName UIAutomationClient; "
-					+ "$automation = [System.Windows.Automation.AutomationElement]::RootElement; "
-					+ "$windows = $automation.FindAll([System.Windows.Automation.TreeScope]::Children, "
-					+ "(New-Object System.Windows.Automation.PropertyCondition([System.Windows.Automation.AutomationElement]::ProcessIdProperty, "
-					+ processId + "))); " + "$windows | ForEach-Object { $_.Current.Name } | Out-String\"";
+	private String getProcessCommandLine(int pid) throws IOException, InterruptedException {
+	    ProcessBuilder pb = new ProcessBuilder("wmic", "process", "where", "ProcessId=" + pid, "get", "CommandLine", "/FORMAT:LIST");
+	    pb.redirectErrorStream(true);
+	    Process process = pb.start();
 
-			Process process = Runtime.getRuntime().exec(windowQuery);
-			Scanner s = new Scanner(process.getInputStream()).useDelimiter("\\A");
-			String windowInfo = s.hasNext() ? s.next().toLowerCase() : "";
-
-			// Palabras clave que indican operaciones de copia
-			Set<String> copyKeywords = new HashSet<>(Arrays.asList("copiar", "copy", "mover", "move", "cortar", "cut",
-					"pegar", "paste", "enviar a", "send to", "guardar como", "save as"));
-
-			for (String keyword : copyKeywords) {
-				if (windowInfo.contains(keyword)) {
-					return true;
-				}
-			}
-
-			// Verificar operaciones de arrastrar y soltar
-			String dragDropQuery = "powershell -Command \"" + "$shell = New-Object -ComObject Shell.Application; "
-					+ "$shell.Windows() | ForEach-Object { $_.LocationURL } | Out-String\"";
-
-			process = Runtime.getRuntime().exec(dragDropQuery);
-			s = new Scanner(process.getInputStream()).useDelimiter("\\A");
-			String locationInfo = s.hasNext() ? s.next().toLowerCase() : "";
-
-			// Si detectamos múltiples ubicaciones abiertas, podría ser una operación de
-			// arrastrar y soltar
-			return locationInfo.split("\n").length > 1;
-
-		} catch (Exception e) {
-			System.err.println("Error verificando ventana de Explorer: " + e.getMessage());
-			return false;
-		}
+	    StringBuilder commandLine = new StringBuilder();
+	    try (BufferedReader reader = new BufferedReader(new InputStreamReader(process.getInputStream()))) {
+	        String line;
+	        while ((line = reader.readLine()) != null) {
+	            if (line.startsWith("CommandLine=")) {
+	                commandLine.append(line.substring("CommandLine=".length()).trim());
+	            }
+	        }
+	    }
+	    process.waitFor();
+	    return commandLine.toString();
 	}
 
-	private String getProcessName(long processId) {
-		try {
-			String processQuery = "powershell -Command \"Get-Process -Id " + processId
-					+ " | Select-Object -ExpandProperty ProcessName\"";
-			Process process = Runtime.getRuntime().exec(processQuery);
-			java.util.Scanner s = new java.util.Scanner(process.getInputStream()).useDelimiter("\\A");
-			String processName = s.hasNext() ? s.next().trim() + ".exe" : "unknown.exe";
-			return processName.toLowerCase();
-		} catch (Exception e) {
-			System.err.println("Error getting process name: " + e.getMessage());
-			return "unknown.exe";
-		}
-	}
 
 	@Override
 	public void cleanup(WString rawPath, DokanFileInfo dokanFileInfo) {
@@ -676,69 +622,41 @@ public class DirListingFileSystem extends DokanFileSystemStub {
 		return NtStatuses.STATUS_SUCCESS;
 	}
 
-	/*
-	 * @Override public int getFileSecurity(WString rawPath, int
-	 * rawSecurityInformation, Pointer rawSecurityDescriptor, int
-	 * rawSecurityDescriptorLength, IntByReference
-	 * rawSecurityDescriptorLengthNeeded, DokanFileInfo dokanFileInfo) { // Extraer
-	 * el nombre del archivo (para logging) String fileName =
-	 * rawPath.toString().replace("\\", "").replace("/", "");
-	 * //System.out.println("(getFileSecurity) Solicitando permisos para: " +
-	 * fileName);
-	 * 
-	 * Advapi32 advapi32 = Advapi32.INSTANCE;
-	 * 
-	 * // Crear e inicializar el descriptor de seguridad WinNT.SECURITY_DESCRIPTOR
-	 * securityDescriptor = new WinNT.SECURITY_DESCRIPTOR(); boolean success =
-	 * advapi32.InitializeSecurityDescriptor(securityDescriptor,
-	 * WinNT.SECURITY_DESCRIPTOR_REVISION); if (!success) {
-	 * System.err.println("Error al inicializar el descriptor de seguridad.");
-	 * return NtStatuses.STATUS_ACCESS_DENIED; }
-	 * 
-	 * // Establecer un DACL nulo para otorgar acceso total a todos (sin
-	 * restricciones) success =
-	 * advapi32.SetSecurityDescriptorDacl(securityDescriptor, true, null, false); if
-	 * (!success) { System.err.
-	 * println("Error al asignar un DACL nulo al descriptor de seguridad."); return
-	 * NtStatuses.STATUS_ACCESS_DENIED; }
-	 * 
-	 * // Obtener el tamaño requerido para el descriptor de seguridad int sdSize =
-	 * securityDescriptor.size();
-	 * rawSecurityDescriptorLengthNeeded.setValue(sdSize);
-	 * 
-	 * // Si el buffer proporcionado es muy pequeño, se retorna
-	 * STATUS_BUFFER_TOO_SMALL if (rawSecurityDescriptorLength < sdSize) { return
-	 * NtStatuses.STATUS_BUFFER_TOO_SMALL; }
-	 * 
-	 * // Escribir el descriptor de seguridad en el buffer proporcionado
-	 * securityDescriptor.write(); // Asegura que la estructura se sincronice con la
-	 * memoria subyacente byte[] sdBytes =
-	 * securityDescriptor.getPointer().getByteArray(0, sdSize);
-	 * rawSecurityDescriptor.write(0, sdBytes, 0, sdSize);
-	 * 
-	 * return NtStatuses.STATUS_SUCCESS; }
-	 */
 	@Override
 	public int moveFile(WString existingFileName, WString newFileName, boolean replaceIfExisting,
-			DokanFileInfo dokanFileInfo) {
-		synchronized (decryptedFiles) {
-			String oldName = Paths.get(existingFileName.toString()).getFileName().toString();
-			String newName = Paths.get(newFileName.toString()).getFileName().toString();
+	                    DokanFileInfo dokanFileInfo) {
+	    synchronized (decryptedFiles) {
+	        String oldName = Paths.get(existingFileName.toString()).getFileName().toString();
+	        String newName = Paths.get(newFileName.toString()).getFileName().toString();
 
-			if (!decryptedFiles.containsKey(oldName)) {
-				return NtStatuses.STATUS_OBJECT_NAME_NOT_FOUND;
-			}
+	        // Obtener la letra de la unidad desde la ruta de los archivos
+	        String oldDrive = Paths.get(existingFileName.toString()).getRoot().toString();
+	        String newDrive = Paths.get(newFileName.toString()).getRoot().toString();
 
-			if (replaceIfExisting && decryptedFiles.containsKey(newName)) {
-				decryptedFiles.remove(newName); // Eliminar el archivo destino si ya existe
-			}
+	        // Si la unidad destino es diferente, bloquear el movimiento fuera de la unidad virtual
+	        if (!oldDrive.equalsIgnoreCase(newDrive)) {
+	            System.err.println("(moveFile) Intento de mover el archivo fuera de la unidad virtual bloqueado: " 
+	                               + existingFileName + " → " + newFileName);
+	            return NtStatuses.STATUS_ACCESS_DENIED;
+	        }
 
-			ByteArrayOutputStream fileData = decryptedFiles.remove(oldName);
-			decryptedFiles.put(newName, fileData);
-			// System.out.println("(moveFile) Archivo renombrado: " + oldName + " → " +
-			// newName);
-		}
-		return NtStatuses.STATUS_SUCCESS;
+	        // Si el archivo no existe en la unidad virtual, retornar error
+	        if (!decryptedFiles.containsKey(oldName)) {
+	            return NtStatuses.STATUS_OBJECT_NAME_NOT_FOUND;
+	        }
+
+	        // Si se permite reemplazar y el archivo ya existe en la nueva ubicación, eliminarlo
+	        if (replaceIfExisting && decryptedFiles.containsKey(newName)) {
+	            decryptedFiles.remove(newName);
+	        }
+
+	        // Mover dentro de la unidad virtual (renombrar el archivo)
+	        ByteArrayOutputStream fileData = decryptedFiles.remove(oldName);
+	        decryptedFiles.put(newName, fileData);
+	        System.out.println("(moveFile) Archivo renombrado dentro de la unidad virtual: " 
+	                           + oldName + " → " + newName);
+	    }
+	    return NtStatuses.STATUS_SUCCESS;
 	}
 
 	@Override
