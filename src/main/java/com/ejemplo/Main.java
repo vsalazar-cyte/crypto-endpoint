@@ -32,7 +32,7 @@ public class Main {
 
 		// Modificar
 		Path localPath = Paths.get("C:\\Users\\lStel\\OneDrive\\Documentos\\PruebaCifrado"); 
-		Path mountPoint  = Paths.get("F:\\"); // La unidad virtual
+		Path mountPoint  = Paths.get("M:\\"); // La unidad virtual
 
 		// Asegurar que el directorio original existe
 		if (!Files.exists(localPath)) {
@@ -81,6 +81,9 @@ public class Main {
 					String fileName = file.getFileName().toString();
 					File encryptedFile;
 
+			        // Obtenemos la ruta relativa respecto a localPath, por ejemplo "docs\\prueba.docx"
+			        String relativeKey = localPath.relativize(file).toString();
+			        
 					// Si el archivo no termina en ".cv", cifrarlo y usar el archivo resultante
 					if (!fileName.endsWith(".cv")) {
 						cryptoVault.encryptAEAD(file.toFile(), alias);
@@ -92,27 +95,53 @@ public class Main {
 
 					System.out.println("Procesando: " + encryptedFile.getName());
 					cryptoVault.decryptAEAD(encryptedFile, alias, decryptedContent);
-					System.out.println("Archivo procesado: " + file.getFileName());
+					// TO-DO: Modificar decryptAEAD para que acepte el nombre
+					// cryptoVault.decryptAEAD(encryptedFile, alias, decryptedContent, relativeKey);
 				} catch (Exception e) {
 					System.err.println("Error procesando " + file.getFileName() + ": " + e.getMessage());
 				}
 			});
 			Map<String, ByteArrayOutputStream> updatedMap = new HashMap<>();
 
-			for (Map.Entry<String, ByteArrayOutputStream> entry : decryptedContent.entrySet()) {
-				String originalKey = entry.getKey();
-				ByteArrayOutputStream value = entry.getValue();
+			Files.walk(localPath)
+			    .filter(Files::isRegularFile)
+			    .forEach(file -> {
+			        // Obtiene la ruta relativa, por ejemplo "docs\prueba.docx" o "tabla.xlsx"
+			        String relativeKey = localPath.relativize(file).toString();
+			        // Obtiene el nombre del archivo, por ejemplo "prueba.docx"
+			        String fileName = file.getFileName().toString();
+			        
+			        // Remover la extensión solo en el nombre del archivo:
+			        int lastDotIndex = fileName.lastIndexOf(".");
+			        String baseFileName = (lastDotIndex != -1) ? fileName.substring(0, lastDotIndex) : fileName;
+			        
+			        // Si el archivo está en una subcarpeta, se conserva la parte de la ruta de carpeta.
+			        Path parent = file.getParent();
+			        String parentRelative = "";
+			        if (parent != null && !parent.equals(localPath)) {
+			            parentRelative = localPath.relativize(parent).toString();
+			        }
+			        
+			        // Reconstruir la nueva clave:
+			        // Si existe ruta de carpeta se une con File.separator, de lo contrario, es solo el nombre base.
+			        String newKey = parentRelative.isEmpty() ? baseFileName : parentRelative + File.separator + baseFileName;
+			        
+			        // Buscar el contenido descifrado en decryptedContent.
+			        // Se busca primero por el nombre simple y, si no se encuentra, por la ruta relativa.
+			        ByteArrayOutputStream baos = null;
+			        if (decryptedContent.containsKey(fileName)) {
+			            baos = decryptedContent.get(fileName);
+			        } else if (decryptedContent.containsKey(relativeKey)) {
+			            baos = decryptedContent.get(relativeKey);
+			        }
+			        
+			        // Si se encontró el contenido, se inserta en updatedMap con la nueva clave.
+			        if (baos != null) {
+			            updatedMap.put(newKey, baos);
+			        }
+			    });
 
-				// Encontrar la posición del último punto
-				int lastDotIndex = originalKey.lastIndexOf(".");
-
-				// Remover todo después del último punto
-				String newKey = (lastDotIndex != -1) ? originalKey.substring(0, lastDotIndex) : originalKey;
-
-				// Agregar al nuevo mapa con la clave modificada
-				updatedMap.put(newKey, value);
-			}
-
+			
 			// Crear el sistema de archivos virtual basado en el contenido descifrado
 			try (DirListingFileSystem fs = new DirListingFileSystem(localPath, fsInfo, updatedMap, mountPoint.toString())) {
 				// Montar el sistema de archivos

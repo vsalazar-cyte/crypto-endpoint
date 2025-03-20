@@ -2,9 +2,6 @@ package com.ejemplo;
 
 import com.sun.jna.Pointer;
 import com.sun.jna.WString;
-import com.sun.jna.platform.win32.Advapi32;
-import com.sun.jna.platform.win32.Advapi32Util;
-import com.sun.jna.platform.win32.Win32Exception;
 import com.sun.jna.platform.win32.WinBase;
 import com.sun.jna.platform.win32.WinNT;
 import com.sun.jna.ptr.IntByReference;
@@ -15,14 +12,11 @@ import dev.dokan.dokan_java.DokanUtils;
 import dev.dokan.dokan_java.FileSystemInformation;
 import dev.dokan.dokan_java.Unsigned;
 import dev.dokan.dokan_java.constants.microsoft.CreateDisposition;
-import dev.dokan.dokan_java.constants.microsoft.CreateOption;
 import dev.dokan.dokan_java.constants.microsoft.NtStatuses;
 import dev.dokan.dokan_java.masking.EnumInteger;
-import dev.dokan.dokan_java.masking.MaskValueSet;
 import dev.dokan.dokan_java.structure.ByHandleFileInformation;
 import dev.dokan.dokan_java.structure.DokanFileInfo;
 import dev.dokan.dokan_java.structure.DokanIOSecurityContext;
-import jnr.ffi.Memory;
 
 import java.io.BufferedReader;
 import java.io.ByteArrayInputStream;
@@ -39,15 +33,16 @@ import java.nio.file.InvalidPathException;
 import java.nio.file.Path;
 import java.nio.file.Paths;
 import java.nio.file.attribute.DosFileAttributes;
+import java.util.ArrayList;
 import java.util.Arrays;
-import java.util.EnumSet;
-import java.util.HashMap;
 import java.util.HashSet;
+import java.util.List;
 import java.util.Map;
-import java.util.Scanner;
 import java.util.Set;
+import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.atomic.AtomicLong;
-import java.util.stream.Stream;
+
+import java.nio.charset.StandardCharsets;
 
 
 /**
@@ -59,9 +54,16 @@ public class DirListingFileSystem extends DokanFileSystemStub {
 	private FileStore fileStore;
 	private Path root;
 	private Map<String, ByteArrayOutputStream> decryptedFiles;
-	private final String mountDrive; // Ejemplo: "D:\\" o "D:"
+	private final String mountDrive; 
+	
 	private static final ThreadLocal<DokanContext> contextHolder = ThreadLocal.withInitial(DokanContext::new);
-
+	
+	// Mapa global para almacenar el PID autorizado para cada archivo.
+	private final Map<String, Integer> fileProcessMap = new ConcurrentHashMap<>();
+	
+	// Asocia el nombre original con un conjunto de nombres temporales
+	private final Map<String, Set<String>> tempFilesByOriginal = new ConcurrentHashMap<>();
+	
 	public DirListingFileSystem(Path root, FileSystemInformation fileSystemInformation, String mountDrive) {
 		super(fileSystemInformation);
 		this.root = root;
@@ -83,7 +85,7 @@ public class DirListingFileSystem extends DokanFileSystemStub {
 		this.decryptedFiles = decryptedFiles;
 		this.handleHandler = new AtomicLong(0);
 		this.mountDrive = mountDrive;
-		System.out.println("DirListingFileSystem: " + mountDrive);
+		System.out.println(decryptedFiles.keySet());
 	}
 
 	@Override
@@ -100,41 +102,44 @@ public class DirListingFileSystem extends DokanFileSystemStub {
 	    String requestedPath = rawPath.toString();
 	    try {
 	        Path p = Paths.get(requestedPath);
-	        // Si la ruta es absoluta, debe tener la raíz (drive) igual a la unidad virtual
 	        if (p.isAbsolute()) {
-	            // Por ejemplo, mountDrive podría ser "D:\\" o "D:" (asegúrate de tener el formato consistente)
 	            String drive = (p.getRoot() != null ? p.getRoot().toString() : "");
 	            if (!drive.equalsIgnoreCase(mountDrive)) {
 	                System.err.println("Intento de abrir o crear archivo fuera de la unidad virtual: " + requestedPath);
 	                return NtStatuses.STATUS_ACCESS_DENIED;
 	            }
 	        }
-	        // Si la ruta es relativa, se asume que está dentro de la unidad virtual (ya que Dokan la interpreta relativa al mount point)
 	    } catch (InvalidPathException e) {
 	        System.err.println("Ruta inválida: " + requestedPath);
 	        return NtStatuses.STATUS_INVALID_PARAMETER;
 	    }
-
-		String rawStr = rawPath.toString();
-		String fileName = "";
-		try {
-			if (rawStr.equals("\\") || rawStr.isEmpty()) {
-				fileName = "";
-			} else {
-				Path p = Paths.get(rawStr);
-				fileName = (p.getFileName() != null ? p.getFileName().toString() : "");
-			}
-
-			// Manejar directorio raíz
-			if (fileName.isEmpty()) {
-				dokanFileInfo.IsDirectory = 1;
-				dokanFileInfo.Context = 1;
-				return NtStatuses.STATUS_SUCCESS;
-			}
-		} catch (InvalidPathException e) {
-			// System.out.println("InvalidPathException: " + rawStr);
-		}
-
+	    
+	    // Obtener la ruta relativa y marcar la raíz como directorio
+	    String fileName = resolveRelativeFileName(rawPath, dokanFileInfo);
+	    
+	    // Si fileName es vacío, ya se ha marcado como directorio (raíz) y retornamos éxito.
+	    if (fileName.isEmpty()) {
+	        return NtStatuses.STATUS_SUCCESS;
+	    }
+	    
+	    // Si no existe una entrada exacta, verificar si se trata de un directorio.
+	    if (!decryptedFiles.containsKey(fileName)) {
+	        String dirPrefix = fileName + "\\"; // O usa File.separator según corresponda
+	        boolean foundDir = false;
+	        for (String key : decryptedFiles.keySet()) {
+	            if (key.startsWith(dirPrefix)) {
+	                foundDir = true;
+	                break;
+	            }
+	        }
+	        if (foundDir) {
+	            // Se reconoce la ruta como un directorio virtual.
+	            dokanFileInfo.IsDirectory = 1;
+	            dokanFileInfo.Context = 1;
+	            return NtStatuses.STATUS_SUCCESS;
+	        }
+	    }
+	    
 		//// System.out.println("(zwCreateFile) Filename: " + fileName);
 		// System.out.println("(zwCreateFile) Acceso solicitado: " + rawDesiredAccess);
 		// System.out.println("(zwCreateFile) Flags de compartición: " +
@@ -143,16 +148,6 @@ public class DirListingFileSystem extends DokanFileSystemStub {
 		//// rawCreateDisposition);
 		
 		synchronized (decryptedFiles) {
-
-			// Modificar la verificación de permisos para ser más permisiva
-
-			boolean canRead = (rawDesiredAccess & (WinNT.GENERIC_READ | WinNT.FILE_READ_DATA | WinNT.FILE_READ_EA
-					| WinNT.FILE_READ_ATTRIBUTES | WinNT.READ_CONTROL | WinNT.SYNCHRONIZE)) != 0;
-			boolean canWrite = (rawDesiredAccess & (WinNT.GENERIC_WRITE | WinNT.FILE_WRITE_DATA | WinNT.FILE_APPEND_DATA
-					| WinNT.GENERIC_ALL | WinNT.FILE_WRITE_ATTRIBUTES | WinNT.FILE_WRITE_EA)) != 0;
-			// Logging para debug
-			// System.out.println("Permisos efectivos - Lectura: " + canRead + ", Escritura:
-			// " + canWrite);
 
 			boolean fileExists = decryptedFiles.containsKey(fileName);
 			CreateDisposition createDisposition = EnumInteger.enumFromInt(rawCreateDisposition,
@@ -164,25 +159,19 @@ public class DirListingFileSystem extends DokanFileSystemStub {
 			case FILE_OVERWRITE_IF:
 				// Si el archivo existe, limpiar su contenido sin borrar el objeto en memoria
 				if (fileExists) {
-					// System.out.println("(zwCreateFile) Sobrescribiendo archivo (sin eliminar): "
-					// + fileName);
 					decryptedFiles.get(fileName).reset(); // Limpiar sin borrar
 				} else {
-					// System.out.println("(zwCreateFile) Creando nuevo archivo en sobreescritura: "
-					// + fileName);
 					decryptedFiles.put(fileName, new ByteArrayOutputStream());
 				}
 				dokanFileInfo.Context = this.handleHandler.incrementAndGet();
 				return NtStatuses.STATUS_SUCCESS;
 
 			case FILE_CREATE:
-				if (fileExists) {
-					return NtStatuses.STATUS_OBJECT_NAME_COLLISION;
-				}
-				// System.out.println("(zwCreateFile) Creando nuevo archivo: " + fileName);
-				decryptedFiles.put(fileName, new ByteArrayOutputStream());
-				dokanFileInfo.Context = this.handleHandler.incrementAndGet();
-				return NtStatuses.STATUS_SUCCESS;
+	            if (fileExists) {
+	                return NtStatuses.STATUS_OBJECT_NAME_COLLISION;
+	            }
+	            decryptedFiles.put(fileName, new ByteArrayOutputStream());
+	            break;
 
 			case FILE_OPEN:
 			case FILE_OPEN_IF:
@@ -203,24 +192,31 @@ public class DirListingFileSystem extends DokanFileSystemStub {
 			default:
 				return NtStatuses.STATUS_INVALID_PARAMETER;
 			}
+			
+	        // Asociar el archivo con el PID del proceso que lo abrió/creó.
+	        fileProcessMap.put(fileName, dokanFileInfo.ProcessId);
+	        dokanFileInfo.Context = this.handleHandler.incrementAndGet();
+	        return NtStatuses.STATUS_SUCCESS;
 		}
+	}
+
+	private String resolveRelativeFileName(WString rawPath, DokanFileInfo dokanFileInfo) {
+	    String rawStr = rawPath.toString();
+	    // Si se trata de la raíz, marcar como directorio.
+	    if (rawStr.equals("\\") || rawStr.isEmpty()) {
+	        dokanFileInfo.IsDirectory = 1;
+	        dokanFileInfo.Context = 1;
+	        return "";
+	    }
+	    // Si tiene una barra inicial, eliminarla para obtener la ruta relativa.
+	    return rawStr.startsWith("\\") ? rawStr.substring(1) : rawStr;
 	}
 
 	@Override
 	public int writeFile(WString rawPath, Pointer rawBuffer, int rawBufferLength, IntByReference rawWrittenLength,
 			long rawOffset, DokanFileInfo dokanFileInfo) {
 
-		String rawStr = rawPath.toString();
-		String fileName;
-		if (rawStr.equals("\\") || rawStr.isEmpty()) {
-			fileName = "";
-		} else {
-			Path p = Paths.get(rawStr);
-			fileName = (p.getFileName() != null ? p.getFileName().toString() : "");
-		}
-
-		// System.out.println("(writeFile) Escribiendo en: " + fileName + " Offset: " +
-		// rawOffset);
+		String fileName = resolveRelativeFileName(rawPath, dokanFileInfo);
 
 		synchronized (decryptedFiles) {
 			ByteArrayOutputStream memoryStream = decryptedFiles.get(fileName);
@@ -265,19 +261,11 @@ public class DirListingFileSystem extends DokanFileSystemStub {
 
 	    // Detectar si se trata de un intento de copia (por ejemplo, extrayendo el archivo fuera de la unidad virtual)
 	    if (isCopyAttempt(rawPath.toString())) {
-	        System.err.println("Intento de copia detectado para " + rawPath + " - Acceso denegado.");
 	        return NtStatuses.STATUS_ACCESS_DENIED;
 	    }
 
 	    // Obtener el nombre del archivo a partir de rawPath
-	    String rawStr = rawPath.toString();
-	    String fileName;
-	    if (rawStr.equals("\\") || rawStr.isEmpty()) {
-	        fileName = "";
-	    } else {
-	        Path p = Paths.get(rawStr);
-	        fileName = (p.getFileName() != null ? p.getFileName().toString() : "");
-	    }
+	    String fileName = resolveRelativeFileName(rawPath, dokanFileInfo);
 
 	    // Obtener los datos en memoria para el archivo solicitado
 	    ByteArrayOutputStream baos = decryptedFiles.get(fileName);
@@ -338,73 +326,52 @@ public class DirListingFileSystem extends DokanFileSystemStub {
 	    return commandLine.toString();
 	}
 
-
-	@Override
-	public void cleanup(WString rawPath, DokanFileInfo dokanFileInfo) {
-		String rawStr = rawPath.toString();
-		String fileName;
-		if (rawStr.equals("\\") || rawStr.isEmpty()) {
-			fileName = "";
-		} else {
-			Path p = Paths.get(rawStr);
-			fileName = (p.getFileName() != null ? p.getFileName().toString() : "");
-		}
-	}
-
-	@Override
-	public void closeFile(WString rawPath, DokanFileInfo dokanFileInfo) {
-		String rawStr = rawPath.toString();
-		String fileName;
-		if (rawStr.equals("\\") || rawStr.isEmpty()) {
-			fileName = "";
-		} else {
-			Path p = Paths.get(rawStr);
-			fileName = (p.getFileName() != null ? p.getFileName().toString() : "");
-		}
-	}
-
 	@Override
 	public int getFileInformation(WString rawPath, ByHandleFileInformation fileInfo, DokanFileInfo dokanFileInfo) {
-		String rawStr = rawPath.toString();
-		String fileName;
-		if (rawStr.equals("\\") || rawStr.isEmpty()) {
-			fileName = "";
-		} else {
-			Path p = Paths.get(rawStr);
-			fileName = (p.getFileName() != null ? p.getFileName().toString() : "");
-		}
+	    String rawStr = rawPath.toString(); // Por ejemplo: "\" o "\sub" o "\sub\prueba-sub.docx"
 
-		// Manejar directorio raíz
-		if (fileName.isEmpty()) {
-			fileInfo.dwFileAttributes = WinNT.FILE_ATTRIBUTE_DIRECTORY; // Es un directorio
-			fileInfo.ftCreationTime = getCurrentFileTime();
-			fileInfo.ftLastAccessTime = getCurrentFileTime();
-			fileInfo.ftLastWriteTime = getCurrentFileTime();
-			return NtStatuses.STATUS_SUCCESS;
-		}
-
-		// Si el archivo existe en memoria, usar su información
-		if (decryptedFiles.containsKey(fileName)) {
-			ByteArrayOutputStream fileData = decryptedFiles.get(fileName);
-
-			fileInfo.dwFileAttributes = WinNT.FILE_ATTRIBUTE_ARCHIVE | WinNT.FILE_ATTRIBUTE_NORMAL;
-
-			fileInfo.nFileSizeHigh = 0;
-			fileInfo.nFileSizeLow = fileData.size(); // Tamaño en bytes
-			fileInfo.ftCreationTime = getCurrentFileTime();
-			fileInfo.ftLastAccessTime = getCurrentFileTime();
-			fileInfo.ftLastWriteTime = getCurrentFileTime();
-
-			// Definir propiedades adicionales para evitar errores de acceso
-			fileInfo.nNumberOfLinks = 1; // Se asume que el archivo tiene un solo enlace
-			fileInfo.dwVolumeSerialNumber = 0x19831116; // Número de serie ficticio
-			fileInfo.nFileIndexHigh = 0;
-			fileInfo.nFileIndexLow = (int) (fileName.hashCode() & 0x7FFFFFFF); // ID único basado en el hash del nombre
-
-			return NtStatuses.STATUS_SUCCESS;
-		}
-
-		return NtStatuses.STATUS_OBJECT_NAME_NOT_FOUND;
+	    // Si es la raíz, se devuelve información de directorio.
+	    if (rawStr.equals("\\") || rawStr.isEmpty()) {
+	        fileInfo.dwFileAttributes = WinNT.FILE_ATTRIBUTE_DIRECTORY;
+	        fileInfo.ftCreationTime = getCurrentFileTime();
+	        fileInfo.ftLastAccessTime = getCurrentFileTime();
+	        fileInfo.ftLastWriteTime = getCurrentFileTime();
+	        return NtStatuses.STATUS_SUCCESS;
+	    }
+	    
+	    // Eliminamos la barra inicial para obtener la ruta relativa, p.ej. "sub" o "sub\prueba-sub.docx"
+	    String relativePath = rawStr.startsWith("\\") ? rawStr.substring(1) : rawStr;
+	    
+	    // Primero, buscamos una entrada exacta en decryptedFiles
+	    if (decryptedFiles.containsKey(relativePath)) {
+	        ByteArrayOutputStream fileData = decryptedFiles.get(relativePath);
+	        fileInfo.dwFileAttributes = WinNT.FILE_ATTRIBUTE_ARCHIVE | WinNT.FILE_ATTRIBUTE_NORMAL;
+	        fileInfo.nFileSizeHigh = 0;
+	        fileInfo.nFileSizeLow = fileData.size();
+	        fileInfo.ftCreationTime = getCurrentFileTime();
+	        fileInfo.ftLastAccessTime = getCurrentFileTime();
+	        fileInfo.ftLastWriteTime = getCurrentFileTime();
+	        fileInfo.nNumberOfLinks = 1;
+	        fileInfo.dwVolumeSerialNumber = 0x19831116;
+	        fileInfo.nFileIndexHigh = 0;
+	        fileInfo.nFileIndexLow = (int)(relativePath.hashCode() & 0x7FFFFFFF);
+	        return NtStatuses.STATUS_SUCCESS;
+	    }
+	    
+	    // Si no se encontró, se verifica si la ruta corresponde a un directorio.
+	    // Si existe al menos un archivo cuya clave inicie con "relativePath\" se asume que es un directorio.
+	    String prefix = relativePath + "\\";
+	    for (String key : decryptedFiles.keySet()) {
+	        if (key.startsWith(prefix)) {
+	            fileInfo.dwFileAttributes = WinNT.FILE_ATTRIBUTE_DIRECTORY;
+	            fileInfo.ftCreationTime = getCurrentFileTime();
+	            fileInfo.ftLastAccessTime = getCurrentFileTime();
+	            fileInfo.ftLastWriteTime = getCurrentFileTime();
+	            return NtStatuses.STATUS_SUCCESS;
+	        }
+	    }
+	    
+	    return NtStatuses.STATUS_OBJECT_NAME_NOT_FOUND;
 	}
 
 	private WinBase.FILETIME getCurrentFileTime() {
@@ -417,63 +384,173 @@ public class DirListingFileSystem extends DokanFileSystemStub {
 		return ft;
 	}
 
-	private ByHandleFileInformation getFileInformation(Path p) throws IOException {
-		DosFileAttributes attr = Files.readAttributes(p, DosFileAttributes.class);
-		long index = 0;
-		if (attr.fileKey() != null) {
-			index = (long) attr.fileKey();
-		}
-		@Unsigned
-		int fileAttr = 0;
-		fileAttr |= attr.isArchive() ? WinNT.FILE_ATTRIBUTE_ARCHIVE : 0;
-		fileAttr |= attr.isSystem() ? WinNT.FILE_ATTRIBUTE_SYSTEM : 0;
-		fileAttr |= attr.isHidden() ? WinNT.FILE_ATTRIBUTE_HIDDEN : 0;
-		fileAttr |= attr.isReadOnly() ? WinNT.FILE_ATTRIBUTE_READONLY : 0;
-		fileAttr |= attr.isDirectory() ? WinNT.FILE_ATTRIBUTE_DIRECTORY : 0;
-		fileAttr |= attr.isSymbolicLink() ? WinNT.FILE_ATTRIBUTE_REPARSE_POINT : 0;
-
-		if (fileAttr == 0) {
-			fileAttr |= WinNT.FILE_ATTRIBUTE_NORMAL;
-		}
-
-		return new ByHandleFileInformation(p.getFileName(), fileAttr, attr.creationTime(), attr.lastAccessTime(),
-				attr.lastModifiedTime(), this.volumeSerialnumber, attr.size(), index);
-	}
-
 	@Override
 	public int findFiles(WString rawPath, DokanOperations.FillWin32FindData fillFindData, DokanFileInfo dokanFileInfo) {
-		try {
-			for (Map.Entry<String, ByteArrayOutputStream> entry : decryptedFiles.entrySet()) {
-				String fileName = entry.getKey();
-				ByteArrayOutputStream fileData = entry.getValue();
-
-				// Crear la estructura WIN32_FIND_DATA para mostrar los archivos en la unidad
-				// virtual
-				WinBase.WIN32_FIND_DATA findData = new WinBase.WIN32_FIND_DATA();
-				findData.dwFileAttributes = WinNT.FILE_ATTRIBUTE_NORMAL; // Se asume archivo normal
-				WString wFileName = new WString(fileName.replace(".cv", "")); // Quitar extensión cifrada
-
-				char[] fileNameChars = wFileName.toString().toCharArray();
-				System.arraycopy(fileNameChars, 0, findData.cFileName, 0,
-						Math.min(fileNameChars.length, findData.cFileName.length));
-
-				findData.nFileSizeHigh = 0;
-				findData.nFileSizeLow = fileData.size();
-				findData.ftCreationTime = getCurrentFileTime();
-				findData.ftLastAccessTime = getCurrentFileTime();
-				findData.ftLastWriteTime = getCurrentFileTime();
-
-				// Llenar la estructura para que Windows pueda listar los archivos en la unidad
-				// virtual
-				fillFindData.fillWin32FindData(findData, dokanFileInfo);
-			}
-
-			return NtStatuses.STATUS_SUCCESS;
-		} catch (Exception e) {
-			e.printStackTrace();
-			return NtStatuses.STATUS_IO_DEVICE_ERROR;
-		}
+	    String rawStr = rawPath.toString();
+	    // Si es raíz, la ruta relativa es vacía; de lo contrario, eliminamos la barra inicial.
+	    String currentDir = (rawStr.equals("\\") || rawStr.isEmpty()) ? "" : rawStr.substring(1);
+	    
+	    // Set para evitar listar directorios duplicados.
+	    Set<String> foldersListed = new HashSet<>();
+	    
+	    try {
+	        for (Map.Entry<String, ByteArrayOutputStream> entry : decryptedFiles.entrySet()) {
+	            String key = entry.getKey(); // Ej: "tabla.xlsx" o "sub\prueba-sub.docx"
+	            
+	            if (currentDir.isEmpty()) {
+	                // En la raíz: 
+	                // Si la clave no contiene separadores, es un archivo en la raíz.
+	                if (!key.contains("\\") && !key.contains("/")) {
+	                    WinBase.WIN32_FIND_DATA findData = new WinBase.WIN32_FIND_DATA();
+	                    findData.dwFileAttributes = WinNT.FILE_ATTRIBUTE_ARCHIVE | WinNT.FILE_ATTRIBUTE_NORMAL;
+	                    char[] fileChars = key.toCharArray();
+	                    System.arraycopy(fileChars, 0, findData.cFileName, 0, Math.min(fileChars.length, findData.cFileName.length));
+	                    ByteArrayOutputStream baos = entry.getValue();
+	                    findData.nFileSizeHigh = 0;
+	                    findData.nFileSizeLow = baos.size();
+	                    findData.ftCreationTime = getCurrentFileTime();
+	                    findData.ftLastAccessTime = getCurrentFileTime();
+	                    findData.ftLastWriteTime = getCurrentFileTime();
+	                    fillFindData.fillWin32FindData(findData, dokanFileInfo);
+	                } else {
+	                    // Si la clave contiene separadores, el primer token es el directorio.
+	                    String folder = key.split("[/\\\\]")[0];
+	                    if (!foldersListed.contains(folder)) {
+	                        foldersListed.add(folder);
+	                        WinBase.WIN32_FIND_DATA findData = new WinBase.WIN32_FIND_DATA();
+	                        findData.dwFileAttributes = WinNT.FILE_ATTRIBUTE_DIRECTORY;
+	                        char[] folderChars = folder.toCharArray();
+	                        System.arraycopy(folderChars, 0, findData.cFileName, 0, Math.min(folderChars.length, findData.cFileName.length));
+	                        findData.ftCreationTime = getCurrentFileTime();
+	                        findData.ftLastAccessTime = getCurrentFileTime();
+	                        findData.ftLastWriteTime = getCurrentFileTime();
+	                        fillFindData.fillWin32FindData(findData, dokanFileInfo);
+	                    }
+	                }
+	            } else {
+	                // Estamos listando el contenido de un directorio específico.
+	                // Se espera que las claves de los archivos en ese directorio empiecen con "currentDir\".
+	                String prefix = currentDir + "\\";
+	                if (key.startsWith(prefix)) {
+	                    // Extraer la parte restante.
+	                    String remaining = key.substring(prefix.length());
+	                    // Si 'remaining' no contiene separadores, es un archivo directamente en el directorio.
+	                    if (!remaining.contains("\\") && !remaining.contains("/")) {
+	                        WinBase.WIN32_FIND_DATA findData = new WinBase.WIN32_FIND_DATA();
+	                        findData.dwFileAttributes = WinNT.FILE_ATTRIBUTE_ARCHIVE | WinNT.FILE_ATTRIBUTE_NORMAL;
+	                        char[] fileChars = remaining.toCharArray();
+	                        System.arraycopy(fileChars, 0, findData.cFileName, 0, Math.min(fileChars.length, findData.cFileName.length));
+	                        ByteArrayOutputStream baos = entry.getValue();
+	                        findData.nFileSizeHigh = 0;
+	                        findData.nFileSizeLow = baos.size();
+	                        findData.ftCreationTime = getCurrentFileTime();
+	                        findData.ftLastAccessTime = getCurrentFileTime();
+	                        findData.ftLastWriteTime = getCurrentFileTime();
+	                        fillFindData.fillWin32FindData(findData, dokanFileInfo);
+	                    } else {
+	                        // Si 'remaining' contiene separador, el primer token es un subdirectorio.
+	                        String folder = remaining.split("[/\\\\]")[0];
+	                        if (!foldersListed.contains(folder)) {
+	                            foldersListed.add(folder);
+	                            WinBase.WIN32_FIND_DATA findData = new WinBase.WIN32_FIND_DATA();
+	                            findData.dwFileAttributes = WinNT.FILE_ATTRIBUTE_DIRECTORY;
+	                            char[] folderChars = folder.toCharArray();
+	                            System.arraycopy(folderChars, 0, findData.cFileName, 0, Math.min(folderChars.length, findData.cFileName.length));
+	                            findData.ftCreationTime = getCurrentFileTime();
+	                            findData.ftLastAccessTime = getCurrentFileTime();
+	                            findData.ftLastWriteTime = getCurrentFileTime();
+	                            fillFindData.fillWin32FindData(findData, dokanFileInfo);
+	                        }
+	                    }
+	                }
+	            }
+	        }
+	        return NtStatuses.STATUS_SUCCESS;
+	    } catch (Exception e) {
+	        e.printStackTrace();
+	        return NtStatuses.STATUS_IO_DEVICE_ERROR;
+	    }
 	}
+
+	public int getShortName(WString rawPath, Pointer buffer, int bufferLength, DokanFileInfo dokanFileInfo) {
+	    // Extraer el nombre de archivo
+	    String rawStr = rawPath.toString();
+	    String fileName = Paths.get(rawStr).getFileName().toString();
+
+	    // Si el nombre ya cumple con 8.3, se retorna tal cual (o en mayúsculas de forma consistente)
+	    if (isValid8Dot3(fileName)) {
+	        byte[] fileNameBytes = fileName.toUpperCase().getBytes(StandardCharsets.UTF_16LE);
+	        int copyLength = Math.min(bufferLength, fileNameBytes.length);
+	        buffer.write(0, fileNameBytes, 0, copyLength);
+	        return NtStatuses.STATUS_SUCCESS;
+	    } else {
+	        // Si no cumple, se genera un nombre 8.3 válido
+	        String shortName = generateShortName(fileName);
+	        byte[] shortNameBytes = shortName.getBytes(StandardCharsets.UTF_16LE);
+	        int copyLength = Math.min(bufferLength, shortNameBytes.length);
+	        buffer.write(0, shortNameBytes, 0, copyLength);
+	        return NtStatuses.STATUS_SUCCESS;
+	    }
+	}
+
+	/**
+	 * Verifica si el nombre cumple con el formato 8.3:
+	 * - La parte del nombre es de máximo 8 caracteres
+	 * - La extensión es de máximo 3 caracteres (si existe)
+	 * - Solo contiene caracteres alfanuméricos (u otros permitidos)
+	 */
+	private boolean isValid8Dot3(String fileName) {
+	    // Separa la parte de nombre y extensión
+	    String namePart = fileName;
+	    String extension = "";
+	    int dotIndex = fileName.lastIndexOf('.');
+	    if (dotIndex != -1) {
+	        namePart = fileName.substring(0, dotIndex);
+	        extension = fileName.substring(dotIndex + 1);
+	    }
+	    
+	    // Verifica longitudes
+	    if (namePart.length() > 8 || extension.length() > 3) {
+	        return false;
+	    }
+	    
+	    // Opcional: verificar que solo contenga caracteres válidos (letras, números, y algunos símbolos permitidos)
+	    // Aquí se asume que solo se permiten letras y dígitos
+	    if (!namePart.matches("[A-Za-z0-9]+") || (!extension.isEmpty() && !extension.matches("[A-Za-z0-9]+"))) {
+	        return false;
+	    }
+	    
+	    return true;
+	}
+
+	/**
+	 * Genera un nombre corto en formato 8.3 para un nombre que no lo cumple.
+	 * (Puedes ajustar la lógica según tus necesidades)
+	 */
+	private String generateShortName(String longName) {
+	    // Separa la parte del nombre y la extensión (si existe)
+	    String namePart = longName;
+	    String extension = "";
+	    int dotIndex = longName.lastIndexOf('.');
+	    if (dotIndex != -1) {
+	        namePart = longName.substring(0, dotIndex);
+	        extension = longName.substring(dotIndex + 1);
+	    }
+	    
+	    // Eliminar caracteres especiales y convertir a mayúsculas
+	    namePart = namePart.replaceAll("[^A-Za-z0-9]", "").toUpperCase();
+	    extension = extension.replaceAll("[^A-Za-z0-9]", "").toUpperCase();
+	    
+	    // Limitar la longitud: si es muy largo, se recorta y se añade '~1'
+	    if (namePart.length() > 6) {
+	        namePart = namePart.substring(0, 6);
+	    }
+	    
+	    // Formar el nombre corto en formato 8.3
+	    return extension.isEmpty() ? String.format("%s~1", namePart) : String.format("%s~1.%s", namePart, extension);
+	}
+
+
 
 	@Override
 	public int getDiskFreeSpace(LongByReference freeBytesAvailable, LongByReference totalNumberOfBytes,
@@ -506,57 +583,6 @@ public class DirListingFileSystem extends DokanFileSystemStub {
 		return NtStatuses.STATUS_SUCCESS;
 	}
 
-	private Path getrootedPath(WString rawPath) {
-		String unixPath = rawPath.toString().replace('\\', '/');
-		String relativeUnixPath = unixPath;
-		if (unixPath.startsWith("/"))
-			relativeUnixPath = unixPath.length() == 1 ? "" : unixPath.substring(1); // if it is already the root, we
-																					// return the empty string
-		return root.resolve(relativeUnixPath);
-	}
-
-	@Override
-	public int flushFileBuffers(WString rawPath, DokanFileInfo dokanFileInfo) {
-		synchronized (decryptedFiles) {
-			String fileName = Paths.get(rawPath.toString()).getFileName().toString();
-
-			// Si el archivo es temporal, no hacer flush, solo permitir escritura
-			if (fileName.endsWith(".tmp") || fileName.startsWith("~$")) {
-				// System.out.println("(flushFileBuffers) Ignorando archivo temporal: " +
-				// fileName);
-				return NtStatuses.STATUS_SUCCESS;
-			}
-
-			if (!decryptedFiles.containsKey(fileName)) {
-				System.err.println("(flushFileBuffers) Archivo no encontrado en memoria: " + fileName);
-				return NtStatuses.STATUS_OBJECT_NAME_NOT_FOUND;
-			}
-
-			// Si el archivo está en uso, retornar error de acceso
-			if (isFileInUse(fileName)) {
-				System.err.println("(flushFileBuffers) Archivo en uso, no se puede vaciar: " + fileName);
-				return NtStatuses.STATUS_SHARING_VIOLATION;
-			}
-
-			try {
-				ByteArrayOutputStream memoryStream = decryptedFiles.get(fileName);
-
-				// Guardar los cambios en memoria
-				byte[] currentData = memoryStream.toByteArray();
-				// decryptedFiles.put(fileName, new ByteArrayOutputStream());
-				// decryptedFiles.get(fileName).write(currentData);
-				memoryStream.flush();
-				// System.out.println("(flushFileBuffers) Archivo confirmado en memoria: " +
-				// fileName);
-				return NtStatuses.STATUS_SUCCESS;
-
-			} catch (IOException e) {
-				System.err.println("Error al vaciar buffers en memoria para: " + fileName);
-				return NtStatuses.STATUS_IO_DEVICE_ERROR;
-			}
-		}
-	}
-
 	public boolean isFileInUse(String fileName) {
 		try {
 			Path filePath = Paths.get("D:\\", fileName); // Ajusta según la ruta de tu unidad virtual
@@ -574,10 +600,61 @@ public class DirListingFileSystem extends DokanFileSystemStub {
 	}
 
 	@Override
-	public void close() {
-		// System.out.println("Persistiendo cambios antes de cerrar el sistema de
-		// archivos...");
+	public void cleanup(WString rawPath, DokanFileInfo dokanFileInfo) {
+		String fileName = resolveRelativeFileName(rawPath, dokanFileInfo);
+	    
+	    // Si se indica que el archivo se debe borrar al cerrar
+	    if (dokanFileInfo.deleteOnClose()) {
+	        // Eliminar el archivo original
+	        decryptedFiles.remove(fileName);
+	        System.out.printf("Se borró archivo original: %s%n", fileName);
+	        // También eliminar sus temporales si existen
+	        Set<String> tempSet = tempFilesByOriginal.remove(fileName);
+	        if (tempSet != null) {
+	            for (String tempName : tempSet) {
+	                decryptedFiles.remove(tempName);
+	                System.out.printf("(cleanup) Se borró archivo temporal: %s%n", tempName);
+	            }
+	        }
+	    }
+	}
 
+	@Override
+	public void closeFile(WString rawPath, DokanFileInfo dokanFileInfo) {
+	    // Obtener la ruta relativa del archivo (incluyendo subcarpetas)
+	    String fileName = resolveRelativeFileName(rawPath, dokanFileInfo);
+
+	    // Solo si el archivo cerrado es el original (es decir, no es un archivo temporal)
+	    if (!isTemporary(fileName)) {
+	        // Primero, eliminar los temporales que se registraron en tempFilesByOriginal
+	        Set<String> tempSet = tempFilesByOriginal.get(fileName);
+	        if (tempSet != null) {
+	            for (String tempName : tempSet) {
+	                decryptedFiles.remove(tempName);
+	            }
+	            tempFilesByOriginal.remove(fileName);
+	        }
+	        
+	        // Luego, recorrer el mapa de decryptedFiles para buscar archivos temporales que empiecen con "~$"
+	        // y que correspondan al archivo original. Esto es necesario porque, en subdirectorios, la clave es la ruta completa.
+	        List<String> keysToRemove = new ArrayList<>();
+	        
+	        for (String key : decryptedFiles.keySet()) {
+	            Path keyPath = Paths.get(key);
+	            String keyBase = keyPath.getFileName().toString();
+	            // Si el nombre base del archivo temporal comienza con "~$" y, al quitar el prefijo, es igual al original
+	            if (keyBase.startsWith("~$")) {
+	                keysToRemove.add(key);
+	            }
+	        }
+	        for (String key : keysToRemove) {
+	            decryptedFiles.remove(key);
+	        }
+	    }
+	}
+
+	@Override
+	public void close() {
 		CryptoVault cryptoVault = new CryptoVault();
 		String alias = "AES"; // Ajusta el alias según corresponda
 
@@ -593,12 +670,7 @@ public class DirListingFileSystem extends DokanFileSystemStub {
 				try (OutputStream fos = new FileOutputStream(outputFile)) {
 					// Llamar al método de cifrado basado en streams
 					cryptoVault.encryptAEAD(bais, alias, fos);
-					// System.out.println("Archivo cifrado guardado: " +
-					// outputFile.getAbsolutePath());
 				}
-
-				// Opcional: Si deseas borrar la versión en memoria después de cifrarla
-				// decryptedFiles.remove(fileName); // O simplemente limpiar al final
 
 			} catch (Exception e) {
 				System.err.println("Error al persistir " + fileName + ": " + e.getMessage());
@@ -611,36 +683,24 @@ public class DirListingFileSystem extends DokanFileSystemStub {
 	}
 
 	@Override
-	public int setFileSecurity(WString rawPath, int rawSecurityInformation, Pointer rawSecurityDescriptor,
-			int rawSecurityDescriptorLength, DokanFileInfo dokanFileInfo) {
-		// Extraer el nombre del archivo
-		String fileName = rawPath.toString().replace("\\", "").replace("/", "");
-		// System.out.println("(SetFileSecurity) Estableciendo permisos en: " +
-		// fileName);
-
-		// Aceptamos todos los cambios de permisos sin aplicarlos realmente (Simulación)
-		return NtStatuses.STATUS_SUCCESS;
-	}
-
-	@Override
 	public int moveFile(WString existingFileName, WString newFileName, boolean replaceIfExisting,
 	                    DokanFileInfo dokanFileInfo) {
 	    synchronized (decryptedFiles) {
-	        String oldName = Paths.get(existingFileName.toString()).getFileName().toString();
-	        String newName = Paths.get(newFileName.toString()).getFileName().toString();
+	        String oldName = resolveRelativeFileName(existingFileName, dokanFileInfo);
+	        String newName = resolveRelativeFileName(newFileName, dokanFileInfo);
 
 	        // Obtener la letra de la unidad desde la ruta de los archivos
 	        String oldDrive = Paths.get(existingFileName.toString()).getRoot().toString();
 	        String newDrive = Paths.get(newFileName.toString()).getRoot().toString();
 
-	        // Si la unidad destino es diferente, bloquear el movimiento fuera de la unidad virtual
+	        // Bloquear movimientos fuera de la unidad virtual
 	        if (!oldDrive.equalsIgnoreCase(newDrive)) {
 	            System.err.println("(moveFile) Intento de mover el archivo fuera de la unidad virtual bloqueado: " 
 	                               + existingFileName + " → " + newFileName);
 	            return NtStatuses.STATUS_ACCESS_DENIED;
 	        }
 
-	        // Si el archivo no existe en la unidad virtual, retornar error
+	        // Verificar que el archivo exista en la unidad virtual
 	        if (!decryptedFiles.containsKey(oldName)) {
 	            return NtStatuses.STATUS_OBJECT_NAME_NOT_FOUND;
 	        }
@@ -650,53 +710,84 @@ public class DirListingFileSystem extends DokanFileSystemStub {
 	            decryptedFiles.remove(newName);
 	        }
 
-	        // Mover dentro de la unidad virtual (renombrar el archivo)
+	        // Mover (renombrar) dentro de la unidad virtual
 	        ByteArrayOutputStream fileData = decryptedFiles.remove(oldName);
 	        decryptedFiles.put(newName, fileData);
+	        // Si el archivo nuevo es temporal, lo asociamos al original
+	        if (isTemporary(newName)) {
+	            // Asumamos que el archivo original es el que se muestra sin prefijo o sin extensión .tmp
+	            // Por ejemplo, si el temporal es "~$prueba.docx" o "E3F38718.tmp", se asocia a "prueba.docx"
+	            String originalName = deduceOriginalName(oldName, newName);
+	            System.out.println("(moveFile) originalName: " + originalName + " - newName");
+	            tempFilesByOriginal.computeIfAbsent(originalName, k -> new HashSet<>()).add(newName);
+	        } else {
+	            // Si se renombra de temporal a original, eliminamos ese temporal de la asociación
+	            String originalName = newName;
+	            Set<String> tempSet = tempFilesByOriginal.get(originalName);
+	            if (tempSet != null) {
+	                tempSet.remove(oldName);
+	                if (tempSet.isEmpty()) {
+	                    tempFilesByOriginal.remove(originalName);
+	                }
+	            }
+	        }
 	        System.out.println("(moveFile) Archivo renombrado dentro de la unidad virtual: " 
 	                           + oldName + " → " + newName);
-	    }
+	   	}
 	    return NtStatuses.STATUS_SUCCESS;
 	}
+	
+	private boolean isTemporary(String fileName) {
+	    String lower = fileName.toLowerCase();
+	    return lower.endsWith(".tmp") || lower.endsWith(".~tmp") || fileName.startsWith("~$");
+	}
+
+	private String deduceOriginalName(String oldName, String newName) {
+	    // Convertir las rutas en objetos Path para trabajar con las partes
+	    Path oldPath = Paths.get(oldName);
+	    String oldBase = oldPath.getFileName().toString(); // Ej: "prueba.docx"
+	    Path parent = oldPath.getParent(); // Puede ser "sub"
+	    
+	    // Si el nuevo nombre termina en ".tmp" o ".~tmp", se asume que es un temporal;
+	    // se devuelve el nombre original, preservando el directorio.
+	    if (newName.toLowerCase().endsWith(".tmp") || newName.toLowerCase().endsWith(".~tmp")) {
+	        if (parent != null) {
+	            return parent.resolve(oldBase).toString();
+	        } else {
+	            return oldBase;
+	        }
+	    }
+	    
+	    // Si el nombre del nuevo archivo empieza con "~$", quitar ese prefijo y conservar el directorio.
+	    Path newPath = Paths.get(newName);
+	    String newBase = newPath.getFileName().toString();
+	    if (newBase.startsWith("~$")) {
+	        String base = newBase.substring(2);
+	        if (parent != null) {
+	            return parent.resolve(base).toString();
+	        } else {
+	            return base;
+	        }
+	    }
+	    // En caso contrario, se retorna newName
+	    return newName;
+	}
+
 
 	@Override
 	public int deleteFile(WString rawPath, DokanFileInfo dokanFileInfo) {
-		synchronized (decryptedFiles) {
-			// Se asume que rawPath viene en formato "\archivo.ext"
-			String fileName = Paths.get(rawPath.toString()).getFileName().toString();
-
-			// Verificar si el archivo está en uso antes de eliminarlo
-			if (isFileInUse(fileName)) {
-				System.err.println("(deleteFile) Archivo en uso, no se puede eliminar: " + fileName);
-				return NtStatuses.STATUS_SHARING_VIOLATION;
-			}
-
-			// Si está en decryptedFiles, eliminarlo
-			if (decryptedFiles.containsKey(fileName)) {
-				decryptedFiles.remove(fileName);
-				return NtStatuses.STATUS_SUCCESS;
-			}
-
-			// Si el archivo no estaba en decryptedFiles, verificar si fue creado en la
-			// unidad virtual
-			// Se utiliza la letra de la unidad almacenada en mountDrive
-			Path filePath = Paths.get(mountDrive, fileName);
-			System.out.println("FILE PATH: " + filePath.toString());
-			File file = filePath.toFile();
-
-			if (file.exists()) {
-				System.out.println("Archivo creado en la unidad virtual");
-				if (file.delete()) {
-					return NtStatuses.STATUS_SUCCESS;
-				} else {
-					System.err.println("(deleteFile) No se pudo eliminar el archivo: " + fileName);
-					return NtStatuses.STATUS_ACCESS_DENIED;
-				}
-			}
-
-			System.err.println("(deleteFile) Archivo no encontrado: " + fileName);
-			return NtStatuses.STATUS_OBJECT_NAME_NOT_FOUND;
-		}
+	    // Extraer el nombre del archivo a partir de la ruta
+	    String rawStr = rawPath.toString();
+	    Path p = Paths.get(rawStr);
+	    String fileName = (p.getFileName() != null ? p.getFileName().toString() : "");
+	    System.out.println("Eliminando archivo " + fileName);
+	    // Si el archivo existe en el mapa, se elimina
+	    if (decryptedFiles.containsKey(fileName)) {
+	        decryptedFiles.remove(fileName);
+	        return NtStatuses.STATUS_SUCCESS;
+	    }
+	    return NtStatuses.STATUS_OBJECT_NAME_NOT_FOUND;
 	}
+
 
 }
