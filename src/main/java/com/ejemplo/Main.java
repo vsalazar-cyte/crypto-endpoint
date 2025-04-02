@@ -4,26 +4,15 @@ import java.nio.file.Paths;
 import java.util.HashMap;
 import java.util.Map;
 import java.util.Scanner;
-import java.util.Set;
-import java.util.concurrent.Executors;
-import java.util.concurrent.ScheduledExecutorService;
-import java.util.concurrent.TimeUnit;
-
-import com.sun.jna.WString;
-
-import dev.dokan.dokan_java.FileSystemInformation;
 import dev.dokan.dokan_java.FileSystemInformation;
 import dev.dokan.dokan_java.constants.dokany.MountOption;
 import dev.dokan.dokan_java.constants.microsoft.FileSystemFlag;
 import dev.dokan.dokan_java.masking.MaskValueSet;
-import dev.dokan.dokan_java.structure.DokanFileInfo;
 
 import java.io.ByteArrayOutputStream;
 import java.io.File;
-import java.io.IOException;
 import java.nio.file.Files;
 import java.nio.file.Path;
-import java.nio.file.Paths;
 
 public class Main {
 
@@ -31,7 +20,7 @@ public class Main {
 		System.out.println("Iniciando el sistema de archivos con Dokan.");
 
 		// Modificar
-		Path localPath = Paths.get("C:\\Users\\lStel\\OneDrive\\Documentos\\PruebaCifrado"); 
+		Path localPath = Paths.get("C:\\Users\\lStel\\Documents\\PruebaCifrado"); 
 		Path mountPoint  = Paths.get("M:\\"); // La unidad virtual
 
 		// Asegurar que el directorio original existe

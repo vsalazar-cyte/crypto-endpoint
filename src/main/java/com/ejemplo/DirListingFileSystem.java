@@ -289,7 +289,7 @@ public class DirListingFileSystem extends DokanFileSystemStub {
 	    return NtStatuses.STATUS_SUCCESS;
 	}
 
-	public DokanContext getContext() {
+	private DokanContext getContext() {
 	    return contextHolder.get();
 	}
 	
@@ -384,115 +384,71 @@ public class DirListingFileSystem extends DokanFileSystemStub {
 		return ft;
 	}
 
-	@Override
-	public int findFiles(WString rawPath, DokanOperations.FillWin32FindData fillFindData, DokanFileInfo dokanFileInfo) {
-	    String rawStr = rawPath.toString();
-	    // Si es raíz, la ruta relativa es vacía; de lo contrario, eliminamos la barra inicial.
-	    String currentDir = (rawStr.equals("\\") || rawStr.isEmpty()) ? "" : rawStr.substring(1);
-	    
-	    // Set para evitar listar directorios duplicados.
-	    Set<String> foldersListed = new HashSet<>();
-	    
-	    try {
-	        for (Map.Entry<String, ByteArrayOutputStream> entry : decryptedFiles.entrySet()) {
-	            String key = entry.getKey(); // Ej: "tabla.xlsx" o "sub\prueba-sub.docx"
-	            
-	            if (currentDir.isEmpty()) {
-	                // En la raíz: 
-	                // Si la clave no contiene separadores, es un archivo en la raíz.
-	                if (!key.contains("\\") && !key.contains("/")) {
-	                    WinBase.WIN32_FIND_DATA findData = new WinBase.WIN32_FIND_DATA();
-	                    findData.dwFileAttributes = WinNT.FILE_ATTRIBUTE_ARCHIVE | WinNT.FILE_ATTRIBUTE_NORMAL;
-	                    char[] fileChars = key.toCharArray();
-	                    System.arraycopy(fileChars, 0, findData.cFileName, 0, Math.min(fileChars.length, findData.cFileName.length));
-	                    ByteArrayOutputStream baos = entry.getValue();
-	                    findData.nFileSizeHigh = 0;
-	                    findData.nFileSizeLow = baos.size();
-	                    findData.ftCreationTime = getCurrentFileTime();
-	                    findData.ftLastAccessTime = getCurrentFileTime();
-	                    findData.ftLastWriteTime = getCurrentFileTime();
-	                    fillFindData.fillWin32FindData(findData, dokanFileInfo);
+	   @Override
+	    public int findFiles(WString rawPath, DokanOperations.FillWin32FindData fillFindData, DokanFileInfo dokanFileInfo) {
+	        String rawStr = rawPath.toString();
+	        // Si es raíz, la ruta relativa es vacía; de lo contrario, eliminamos la barra inicial.
+	        String currentDir = (rawStr.equals("\\") || rawStr.isEmpty()) ? "" : rawStr.substring(1);
+
+	        // Set para evitar listar directorios duplicados.
+	        Set<String> foldersListed = new HashSet<>();
+
+	        try {
+	            for (Map.Entry<String, ByteArrayOutputStream> entry : decryptedFiles.entrySet()) {
+	                String key = entry.getKey(); // Ej: "tabla.xlsx" o "sub\prueba-sub.docx"
+
+	                if (currentDir.isEmpty()) {
+	                    // En la raíz:
+	                    // Si la clave no contiene separadores, es un archivo en la raíz.
+	                    fillFileFindData(fillFindData, dokanFileInfo, foldersListed, entry, key);
 	                } else {
-	                    // Si la clave contiene separadores, el primer token es el directorio.
-	                    String folder = key.split("[/\\\\]")[0];
-	                    if (!foldersListed.contains(folder)) {
-	                        foldersListed.add(folder);
-	                        WinBase.WIN32_FIND_DATA findData = new WinBase.WIN32_FIND_DATA();
-	                        findData.dwFileAttributes = WinNT.FILE_ATTRIBUTE_DIRECTORY;
-	                        char[] folderChars = folder.toCharArray();
-	                        System.arraycopy(folderChars, 0, findData.cFileName, 0, Math.min(folderChars.length, findData.cFileName.length));
-	                        findData.ftCreationTime = getCurrentFileTime();
-	                        findData.ftLastAccessTime = getCurrentFileTime();
-	                        findData.ftLastWriteTime = getCurrentFileTime();
-	                        fillFindData.fillWin32FindData(findData, dokanFileInfo);
-	                    }
-	                }
-	            } else {
-	                // Estamos listando el contenido de un directorio específico.
-	                // Se espera que las claves de los archivos en ese directorio empiecen con "currentDir\".
-	                String prefix = currentDir + "\\";
-	                if (key.startsWith(prefix)) {
-	                    // Extraer la parte restante.
-	                    String remaining = key.substring(prefix.length());
-	                    // Si 'remaining' no contiene separadores, es un archivo directamente en el directorio.
-	                    if (!remaining.contains("\\") && !remaining.contains("/")) {
-	                        WinBase.WIN32_FIND_DATA findData = new WinBase.WIN32_FIND_DATA();
-	                        findData.dwFileAttributes = WinNT.FILE_ATTRIBUTE_ARCHIVE | WinNT.FILE_ATTRIBUTE_NORMAL;
-	                        char[] fileChars = remaining.toCharArray();
-	                        System.arraycopy(fileChars, 0, findData.cFileName, 0, Math.min(fileChars.length, findData.cFileName.length));
-	                        ByteArrayOutputStream baos = entry.getValue();
-	                        findData.nFileSizeHigh = 0;
-	                        findData.nFileSizeLow = baos.size();
-	                        findData.ftCreationTime = getCurrentFileTime();
-	                        findData.ftLastAccessTime = getCurrentFileTime();
-	                        findData.ftLastWriteTime = getCurrentFileTime();
-	                        fillFindData.fillWin32FindData(findData, dokanFileInfo);
-	                    } else {
-	                        // Si 'remaining' contiene separador, el primer token es un subdirectorio.
-	                        String folder = remaining.split("[/\\\\]")[0];
-	                        if (!foldersListed.contains(folder)) {
-	                            foldersListed.add(folder);
-	                            WinBase.WIN32_FIND_DATA findData = new WinBase.WIN32_FIND_DATA();
-	                            findData.dwFileAttributes = WinNT.FILE_ATTRIBUTE_DIRECTORY;
-	                            char[] folderChars = folder.toCharArray();
-	                            System.arraycopy(folderChars, 0, findData.cFileName, 0, Math.min(folderChars.length, findData.cFileName.length));
-	                            findData.ftCreationTime = getCurrentFileTime();
-	                            findData.ftLastAccessTime = getCurrentFileTime();
-	                            findData.ftLastWriteTime = getCurrentFileTime();
-	                            fillFindData.fillWin32FindData(findData, dokanFileInfo);
-	                        }
+	                    // Estamos listando el contenido de un directorio específico.
+	                    // Se espera que las claves de los archivos en ese directorio empiecen con "currentDir\".
+	                    String prefix = currentDir + "\\";
+	                    if (key.startsWith(prefix)) {
+	                        // Extraer la parte restante.
+	                        String remaining = key.substring(prefix.length());
+	                        // Si 'remaining' no contiene separadores, es un archivo directamente en el directorio.
+	                        fillFileFindData(fillFindData, dokanFileInfo, foldersListed, entry, remaining);
 	                    }
 	                }
 	            }
+	            return NtStatuses.STATUS_SUCCESS;
+	        } catch (Exception e) {
+	            e.printStackTrace();
+	            return NtStatuses.STATUS_IO_DEVICE_ERROR;
 	        }
-	        return NtStatuses.STATUS_SUCCESS;
-	    } catch (Exception e) {
-	        e.printStackTrace();
-	        return NtStatuses.STATUS_IO_DEVICE_ERROR;
 	    }
-	}
 
-	public int getShortName(WString rawPath, Pointer buffer, int bufferLength, DokanFileInfo dokanFileInfo) {
-	    // Extraer el nombre de archivo
-	    String rawStr = rawPath.toString();
-	    String fileName = Paths.get(rawStr).getFileName().toString();
-
-	    // Si el nombre ya cumple con 8.3, se retorna tal cual (o en mayúsculas de forma consistente)
-	    if (isValid8Dot3(fileName)) {
-	        byte[] fileNameBytes = fileName.toUpperCase().getBytes(StandardCharsets.UTF_16LE);
-	        int copyLength = Math.min(bufferLength, fileNameBytes.length);
-	        buffer.write(0, fileNameBytes, 0, copyLength);
-	        return NtStatuses.STATUS_SUCCESS;
-	    } else {
-	        // Si no cumple, se genera un nombre 8.3 válido
-	        String shortName = generateShortName(fileName);
-	        byte[] shortNameBytes = shortName.getBytes(StandardCharsets.UTF_16LE);
-	        int copyLength = Math.min(bufferLength, shortNameBytes.length);
-	        buffer.write(0, shortNameBytes, 0, copyLength);
-	        return NtStatuses.STATUS_SUCCESS;
+	    private void fillFileFindData(DokanOperations.FillWin32FindData fillFindData, DokanFileInfo dokanFileInfo, Set<String> foldersListed, Map.Entry<String, ByteArrayOutputStream> entry, String key) {
+	        if (!key.contains("\\") && !key.contains("/")) {
+	            WinBase.WIN32_FIND_DATA findData = new WinBase.WIN32_FIND_DATA();
+	            findData.dwFileAttributes = WinNT.FILE_ATTRIBUTE_ARCHIVE | WinNT.FILE_ATTRIBUTE_NORMAL;
+	            char[] fileChars = key.toCharArray();
+	            System.arraycopy(fileChars, 0, findData.cFileName, 0, Math.min(fileChars.length, findData.cFileName.length));
+	            ByteArrayOutputStream baos = entry.getValue();
+	            findData.nFileSizeHigh = 0;
+	            findData.nFileSizeLow = baos.size();
+	            findData.ftCreationTime = getCurrentFileTime();
+	            findData.ftLastAccessTime = getCurrentFileTime();
+	            findData.ftLastWriteTime = getCurrentFileTime();
+	            fillFindData.fillWin32FindData(findData, dokanFileInfo);
+	        } else {
+	            // Si la clave contiene separadores, el primer token es el directorio.
+	            String folder = key.split("[/\\\\]")[0];
+	            if (!foldersListed.contains(folder)) {
+	                foldersListed.add(folder);
+	                WinBase.WIN32_FIND_DATA findData = new WinBase.WIN32_FIND_DATA();
+	                findData.dwFileAttributes = WinNT.FILE_ATTRIBUTE_DIRECTORY;
+	                char[] folderChars = folder.toCharArray();
+	                System.arraycopy(folderChars, 0, findData.cFileName, 0, Math.min(folderChars.length, findData.cFileName.length));
+	                findData.ftCreationTime = getCurrentFileTime();
+	                findData.ftLastAccessTime = getCurrentFileTime();
+	                findData.ftLastWriteTime = getCurrentFileTime();
+	                fillFindData.fillWin32FindData(findData, dokanFileInfo);
+	            }
+	        }
 	    }
-	}
-
 	/**
 	 * Verifica si el nombre cumple con el formato 8.3:
 	 * - La parte del nombre es de máximo 8 caracteres
